@@ -129,12 +129,16 @@ class StartupTreeModel:
 @dataclass
 class RepositoryInventory:
     ecmccfg_root: Optional[Path]
+    ecmccomp_root: Optional[Path]
     module_scripts: Dict[str, List[Path]]
     module_macro_specs: Dict[str, "MacroSpec"]
     module_macro_usage: Dict[str, "FileMacroUsage"]
     hardware_descs: Set[str]
+    hardware_component_types: Dict[str, str]
     hardware_configs: Dict[str, List[Path]]
     hardware_entries: Dict[str, Set[str]]
+    component_definitions: Dict[str, "ComponentDefinition"]
+    component_support: Dict[str, Dict[str, "ComponentSupport"]]
     known_commands: Set[str]
     ecb_schema: Optional[Dict[str, object]]
 
@@ -149,6 +153,22 @@ class MacroSpec:
 class FileMacroUsage:
     used: Set[str]
     required: Set[str]
+
+
+@dataclass(frozen=True)
+class ComponentDefinition:
+    name: str
+    path: Path
+    comp_type: str
+
+
+@dataclass(frozen=True)
+class ComponentSupport:
+    comp_hw_type: str
+    comp_type: str
+    path: Path
+    supported_macros: Set[str]
+    channel_count: Optional[int]
 
 
 @dataclass
@@ -187,6 +207,41 @@ def _find_ecmccfg_root(anchor: Optional[Path] = None) -> Optional[Path]:
             return direct_root
         submodule_root = candidate / "ecmccfg"
         if (submodule_root / "hardware").is_dir() and (submodule_root / "scripts").is_dir():
+            return submodule_root
+    return None
+
+
+def _find_ecmccomp_root(ecmccfg_root: Optional[Path], anchor: Optional[Path] = None) -> Optional[Path]:
+    candidates: List[Path] = []
+    if anchor is not None:
+        resolved_anchor = anchor.resolve()
+        candidates.extend([resolved_anchor, *resolved_anchor.parents])
+    if ecmccfg_root is not None:
+        resolved_cfg_root = ecmccfg_root.resolve()
+        candidates.extend([resolved_cfg_root, *resolved_cfg_root.parents])
+
+    script_dir = Path(__file__).resolve().parent
+    candidates.extend([script_dir, *script_dir.parents])
+
+    cwd = Path.cwd().resolve()
+    candidates.extend([cwd, *cwd.parents])
+
+    seen: Set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        direct_root = candidate
+        if (
+            (direct_root / "scripts" / "applyComponent.cmd").exists()
+            and ((direct_root / "drive_slaves").is_dir() or (direct_root / "motors").is_dir())
+        ):
+            return direct_root
+        submodule_root = candidate / "ecmccomp"
+        if (
+            (submodule_root / "scripts" / "applyComponent.cmd").exists()
+            and ((submodule_root / "drive_slaves").is_dir() or (submodule_root / "motors").is_dir())
+        ):
             return submodule_root
     return None
 
@@ -364,12 +419,16 @@ def _build_repository_inventory(ecmccfg_root: Optional[Path]) -> RepositoryInven
     if ecmccfg_root is None:
         return RepositoryInventory(
             ecmccfg_root=None,
+            ecmccomp_root=None,
             module_scripts={},
             module_macro_specs={},
             module_macro_usage={},
             hardware_descs=set(),
+            hardware_component_types={},
             hardware_configs={},
             hardware_entries={},
+            component_definitions={},
+            component_support={},
             known_commands=set(KNOWN_IOCSH_COMMANDS),
             ecb_schema=None,
         )
@@ -395,15 +454,22 @@ def _build_repository_inventory(ecmccfg_root: Optional[Path]) -> RepositoryInven
             ecb_schema = None
 
     hardware_index = _index_by_name(hardware_paths)
+    hardware_component_types = _build_hardware_component_type_inventory(hardware_index)
+    ecmccomp_root = _find_ecmccomp_root(ecmccfg_root)
+    component_definitions, component_support = _build_component_library_inventory(ecmccomp_root)
 
     return RepositoryInventory(
         ecmccfg_root=ecmccfg_root.resolve(),
+        ecmccomp_root=ecmccomp_root.resolve() if ecmccomp_root is not None else None,
         module_scripts=_index_by_name(module_script_paths),
         module_macro_specs={path.name: _build_macro_spec(path) for path in module_script_paths},
         module_macro_usage={path.name: _build_macro_usage(path) for path in module_script_paths},
         hardware_descs=hardware_descs,
+        hardware_component_types=hardware_component_types,
         hardware_configs=hardware_index,
         hardware_entries=_build_hardware_entry_inventory(hardware_index),
+        component_definitions=component_definitions,
+        component_support=component_support,
         known_commands=_scan_known_commands(ecmccfg_root),
         ecb_schema=ecb_schema,
     )
@@ -497,6 +563,152 @@ def _build_hardware_entry_inventory(hardware_index: Dict[str, List[Path]]) -> Di
             hw_entries.update(_extract_hardware_entry_names(path, hardware_index))
 
     return inventory
+
+
+def _parse_epics_env_assignment(line: str) -> Optional[Tuple[str, str]]:
+    stripped = _strip_inline_comment(line).strip()
+    if not stripped.startswith("epicsEnvSet("):
+        return None
+    inner = stripped[len("epicsEnvSet(") :]
+    if ")" not in inner:
+        return None
+    inner = inner.rsplit(")", 1)[0].strip()
+    parts = _split_top_level(inner)
+    if len(parts) >= 2:
+        name = _normalize_value(parts[0])
+        value = _normalize_value(",".join(parts[1:]))
+    else:
+        match = re.match(r'(".*?"|\'.*?\'|\S+)\s+(.+)$', inner)
+        if not match:
+            return None
+        name = _normalize_value(match.group(1))
+        value = _normalize_value(match.group(2))
+    if not re.fullmatch(r"[A-Z0-9_]+", name):
+        return None
+    return name, value
+
+
+def _extract_included_cmd_names(text: str) -> List[str]:
+    names: List[str] = []
+    for raw_line in text.splitlines():
+        stripped = _strip_inline_comment(raw_line).strip()
+        if not stripped.startswith("<"):
+            continue
+        match = re.search(r"([A-Za-z0-9_.+-]+\.cmd)\b", stripped)
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+def _read_cmd_env_assignments(
+    path: Path,
+    cmd_index: Dict[str, List[Path]],
+    stack: Optional[Set[Path]] = None,
+) -> Dict[str, str]:
+    resolved = path.resolve()
+    if stack is None:
+        stack = set()
+    if resolved in stack:
+        return {}
+    stack = set(stack)
+    stack.add(resolved)
+
+    try:
+        text = _read_text(path)
+    except Exception:
+        return {}
+
+    assignments: Dict[str, str] = {}
+    for raw_line in text.splitlines():
+        stripped = _strip_inline_comment(raw_line).strip()
+        if not stripped:
+            continue
+        if stripped.startswith("<"):
+            for include_name in _extract_included_cmd_names(raw_line):
+                for nested_path in cmd_index.get(include_name, []):
+                    assignments.update(_read_cmd_env_assignments(nested_path, cmd_index, stack))
+            continue
+        parsed = _parse_epics_env_assignment(raw_line)
+        if parsed is None:
+            continue
+        key, value = parsed
+        assignments[key] = value
+    return assignments
+
+
+def _build_hardware_component_type_inventory(hardware_index: Dict[str, List[Path]]) -> Dict[str, str]:
+    inventory: Dict[str, str] = {}
+    for file_name, paths in hardware_index.items():
+        stem = Path(file_name).stem
+        if not stem.lower().startswith("ecmc") or len(stem) <= 4:
+            continue
+        hw_desc = stem[4:]
+        for path in paths:
+            assignments = _read_cmd_env_assignments(path, hardware_index)
+            comp_type = assignments.get("ECMC_EC_COMP_TYPE", "").strip()
+            if comp_type:
+                inventory[hw_desc] = comp_type
+                break
+    return inventory
+
+
+def _build_component_library_inventory(
+    ecmccomp_root: Optional[Path],
+) -> Tuple[Dict[str, ComponentDefinition], Dict[str, Dict[str, ComponentSupport]]]:
+    if ecmccomp_root is None or not ecmccomp_root.exists():
+        return {}, {}
+
+    cmd_paths = sorted(ecmccomp_root.rglob("*.cmd"))
+    cmd_index = _index_by_name(cmd_paths)
+    ignored_parts = {"scripts", "support", "hw_sdo_scripts", "not_ready"}
+
+    component_definitions: Dict[str, ComponentDefinition] = {}
+    component_types: Set[str] = set()
+    for path in cmd_paths:
+        relative_parts = set(path.relative_to(ecmccomp_root).parts)
+        if relative_parts & ignored_parts:
+            continue
+        assignments = _read_cmd_env_assignments(path, cmd_index)
+        comp_type = assignments.get("COMP_TYPE", "").strip()
+        if not comp_type:
+            continue
+        component_definitions[path.stem] = ComponentDefinition(name=path.stem, path=path, comp_type=comp_type)
+        component_types.add(comp_type)
+
+    component_support: Dict[str, Dict[str, ComponentSupport]] = {}
+    type_candidates = sorted(component_types, key=len, reverse=True)
+    for path in cmd_paths:
+        relative_parts = set(path.relative_to(ecmccomp_root).parts)
+        if relative_parts & ignored_parts:
+            continue
+        stem = path.stem
+        matched_type = ""
+        for comp_type in type_candidates:
+            if stem.endswith("_" + comp_type):
+                matched_type = comp_type
+                break
+        if not matched_type:
+            continue
+        comp_hw_type = stem[: -(len(matched_type) + 1)].strip("_")
+        if not comp_hw_type:
+            continue
+        assignments = _read_cmd_env_assignments(path, cmd_index)
+        if not any(key in assignments for key in {"SLAVE_SCRIPT", "SLAVE_CHANNELS", "SUPP_MACROS", "SLAVE_TYPE"}):
+            continue
+        supported_macros = {
+            item.strip()
+            for item in _normalize_value(assignments.get("SUPP_MACROS", "")).split(",")
+            if item.strip()
+        }
+        component_support.setdefault(comp_hw_type, {})[matched_type] = ComponentSupport(
+            comp_hw_type=comp_hw_type,
+            comp_type=matched_type,
+            path=path,
+            supported_macros=supported_macros,
+            channel_count=_parse_int_value(assignments.get("SLAVE_CHANNELS", "")),
+        )
+
+    return component_definitions, component_support
 
 
 def _normalize_value(value: str) -> str:
@@ -1092,6 +1304,31 @@ def _validate_expanded_ec_links(
                 )
 
     return issues
+
+
+def _component_validation_context(
+    expanded_key_map: Dict[str, str],
+    env_values: Dict[str, str],
+    slave_hw_desc_by_id: Dict[int, str],
+    inventory: RepositoryInventory,
+) -> Dict[str, object]:
+    component_slave_id = _parse_int_value(expanded_key_map.get("COMP_S_ID", env_values.get("ECMC_EC_SLAVE_NUM", "")))
+    slave_hw_desc = slave_hw_desc_by_id.get(component_slave_id, "") if component_slave_id is not None else ""
+    explicit_ec_comp_type = _normalize_value(expanded_key_map.get("EC_COMP_TYPE", env_values.get("ECMC_EC_COMP_TYPE", ""))) or ""
+    fallback_hw_type = _normalize_value(env_values.get("ECMC_EC_HWTYPE", "")) or ""
+    if fallback_hw_type:
+        fallback_hw_type = inventory.hardware_component_types.get(fallback_hw_type, fallback_hw_type)
+    expected_ec_comp_type = inventory.hardware_component_types.get(slave_hw_desc, slave_hw_desc) if slave_hw_desc else ""
+    resolved_ec_comp_type = explicit_ec_comp_type or expected_ec_comp_type or fallback_hw_type
+    support_map = inventory.component_support.get(resolved_ec_comp_type, {}) if resolved_ec_comp_type else {}
+    return {
+        "component_slave_id": component_slave_id,
+        "slave_hw_desc": slave_hw_desc,
+        "explicit_ec_comp_type": explicit_ec_comp_type,
+        "expected_ec_comp_type": expected_ec_comp_type,
+        "resolved_ec_comp_type": resolved_ec_comp_type,
+        "support_map": support_map,
+    }
 
 
 def _parse_simple_yaml_paths(text: str) -> List[ParsedMappingLine]:
@@ -1738,6 +1975,136 @@ def _validate_single_file(
                     issues.extend(plc_tree_issues)
                     issues.extend(
                         _validate_expanded_ec_links(plc_lines, current_master_id, slave_hw_desc_by_id, inventory)
+                    )
+
+        if module_script_name == "applyComponent.cmd" and (
+            inventory.component_definitions or inventory.component_support
+        ):
+            component_name = expanded_key_map.get("COMP", "").strip()
+            component_context = _component_validation_context(expanded_key_map, env_values, slave_hw_desc_by_id, inventory)
+            component_slave_id = component_context["component_slave_id"]
+            slave_hw_desc = str(component_context["slave_hw_desc"])
+            explicit_ec_comp_type = str(component_context["explicit_ec_comp_type"])
+            expected_ec_comp_type = str(component_context["expected_ec_comp_type"])
+            resolved_ec_comp_type = str(component_context["resolved_ec_comp_type"])
+            support_map = dict(component_context["support_map"])
+            definition = inventory.component_definitions.get(component_name) if component_name else None
+
+            if component_name and inventory.component_definitions and definition is None:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        source=path,
+                        line=line_no,
+                        message=f"Component '{component_name}' was not found in ecmccomp",
+                    )
+                )
+
+            if (
+                component_slave_id is not None
+                and component_slave_id not in slave_hw_desc_by_id
+                and not explicit_ec_comp_type
+            ):
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        source=path,
+                        line=line_no,
+                        message=(
+                            "Cannot verify component support because slave {} has not been added with "
+                            "addSlave.cmd or configureSlave.cmd before this component"
+                        ).format(component_slave_id),
+                    )
+                )
+
+            if explicit_ec_comp_type and expected_ec_comp_type and explicit_ec_comp_type != expected_ec_comp_type:
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        source=path,
+                        line=line_no,
+                        message=(
+                            "EC_COMP_TYPE '{}' does not match slave {} HW_DESC '{}' "
+                            "(expected '{}')"
+                        ).format(
+                            explicit_ec_comp_type,
+                            component_slave_id if component_slave_id is not None else "?",
+                            slave_hw_desc or "<unknown>",
+                            expected_ec_comp_type,
+                        ),
+                    )
+                )
+
+            if resolved_ec_comp_type and inventory.component_support and not support_map:
+                slave_details = []
+                if component_slave_id is not None:
+                    slave_details.append(f"slave {component_slave_id}")
+                if slave_hw_desc:
+                    slave_details.append(f"HW_DESC '{slave_hw_desc}'")
+                suffix = " for {}".format(", ".join(slave_details)) if slave_details else ""
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        source=path,
+                        line=line_no,
+                        message=(
+                            "No component support was found in ecmccomp for EC_COMP_TYPE '{}'{}"
+                        ).format(resolved_ec_comp_type, suffix),
+                    )
+                )
+
+            if definition is not None and support_map and definition.comp_type not in support_map:
+                slave_details = []
+                if component_slave_id is not None:
+                    slave_details.append(f"slave {component_slave_id}")
+                if slave_hw_desc:
+                    slave_details.append(f"HW_DESC '{slave_hw_desc}'")
+                suffix = " ({})".format(", ".join(slave_details)) if slave_details else ""
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        source=path,
+                        line=line_no,
+                        message=(
+                            "Component '{}' of type '{}' is not supported by EC_COMP_TYPE '{}'{}"
+                        ).format(
+                            component_name,
+                            definition.comp_type,
+                            resolved_ec_comp_type or "<unset>",
+                            suffix,
+                        ),
+                    )
+                )
+
+            macros_payload = expanded_key_map.get("MACROS", "").strip()
+            if definition is not None and macros_payload:
+                macro_pairs, malformed_component_macros = _parse_macro_payload(macros_payload)
+                for malformed in malformed_component_macros:
+                    issues.append(
+                        ValidationIssue(
+                            severity="warning",
+                            source=path,
+                            line=line_no,
+                            message=f"Malformed MACROS segment for 'applyComponent.cmd': {malformed}",
+                        )
+                    )
+                support = support_map.get(definition.comp_type) if support_map else None
+                allowed_macros = support.supported_macros if support is not None else set()
+                invalid_macros = sorted(key for key, _value in macro_pairs if allowed_macros and key not in allowed_macros)
+                if invalid_macros:
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            source=path,
+                            line=line_no,
+                            message=(
+                                "Component macros {} are not supported for '{}' on EC_COMP_TYPE '{}'"
+                            ).format(
+                                ", ".join(invalid_macros),
+                                component_name,
+                                resolved_ec_comp_type or "<unset>",
+                            ),
+                        )
                     )
 
         if module_script_name:
@@ -2653,15 +3020,22 @@ class ValidatorApp:
         self.validation_issue_tree = None
         self.validation_summary_var = tk.StringVar(value="No validation results yet.")
         self.issue_item_map: Dict[str, ValidationIssue] = {}
+        self.param_notebook = None
+        self.file_browser_tree = None
+        self.file_browser_item_paths: Dict[str, Path] = {}
+        self.file_browser_root: Optional[Path] = None
         self.editor_scrollbar = None
         self._editor_update_job = None
+        self._editor_tree_sync_job = None
         self._search_update_job = None
         self.editor_search_entry = None
         self.object_tree_items: Dict[Tuple[Path, int, str, str], str] = {}
         self.linked_file_tree_items: Dict[Path, List[str]] = {}
+        self.linked_file_item_by_object_key: Dict[Tuple[Path, int, str, str], str] = {}
         self.file_tree_items: Dict[Path, str] = {}
         self._suppress_tree_open_on_select = False
         self._last_editor_sync_location: Optional[Tuple[Path, int]] = None
+        self.current_edit_linked_object_key: Optional[Tuple[Path, int, str, str]] = None
         self.editor_completion_popup = None
         self.editor_completion_listbox = None
         self.editor_completion_label_var = tk.StringVar(value="")
@@ -2669,6 +3043,11 @@ class ValidatorApp:
         self.editor_completion_range: Optional[Tuple[str, str]] = None
         self._editor_completion_should_open = False
         self._editor_completion_forced = False
+        self.editor_macro_tooltip = None
+        self.editor_macro_tooltip_label = None
+        self._editor_macro_hover_job = None
+        self._editor_macro_hover_token = None
+        self._editor_macro_hover_event = None
         self.log_pane = None
         self.log_frame = None
         self.log_toggle_button = None
@@ -2718,9 +3097,9 @@ class ValidatorApp:
         body.add(right, weight=5)
 
         object_frame = ttk.Frame(left)
-        param_frame = ttk.Frame(left)
+        lower_left = ttk.Frame(left)
         left.add(object_frame, weight=3)
-        left.add(param_frame, weight=2)
+        left.add(lower_left, weight=2)
 
         ttk.Label(object_frame, text="Startup Objects").pack(anchor=tk.W, pady=(0, 4))
         self.startup_tree = ttk.Treeview(object_frame, columns=("type", "summary"), show="tree headings")
@@ -2746,7 +3125,11 @@ class ValidatorApp:
 
         self.startup_menu = tk.Menu(self.root, tearoff=0)
 
-        ttk.Label(param_frame, text="Object Parameters").pack(anchor=tk.W, pady=(0, 4))
+        self.param_notebook = ttk.Notebook(lower_left)
+        self.param_notebook.pack(fill=tk.BOTH, expand=True)
+
+        param_frame = ttk.Frame(self.param_notebook)
+        self.param_notebook.add(param_frame, text="Object Parameters")
         self.param_tree = ttk.Treeview(param_frame, columns=("value",), show="tree headings")
         self.param_tree.heading("#0", text="Parameter", anchor=tk.W)
         self.param_tree.heading("value", text="Value", anchor=tk.W)
@@ -2758,6 +3141,20 @@ class ValidatorApp:
         self.param_tree.configure(yscrollcommand=param_scroll.set)
         self.param_tree.bind("<Double-1>", self._edit_selected_parameter)
         self.param_tree.bind("<Return>", self._edit_selected_parameter)
+
+        file_browser_frame = ttk.Frame(self.param_notebook)
+        self.param_notebook.add(file_browser_frame, text="File Structure")
+        self.file_browser_tree = ttk.Treeview(file_browser_frame, columns=("type",), show="tree headings")
+        self.file_browser_tree.heading("#0", text="Path", anchor=tk.W)
+        self.file_browser_tree.heading("type", text="Type", anchor=tk.W)
+        self.file_browser_tree.column("#0", width=280, stretch=True, anchor=tk.W)
+        self.file_browser_tree.column("type", width=90, stretch=False, anchor=tk.W)
+        self.file_browser_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        file_browser_scroll = ttk.Scrollbar(file_browser_frame, orient=tk.VERTICAL, command=self.file_browser_tree.yview)
+        file_browser_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.file_browser_tree.configure(yscrollcommand=file_browser_scroll.set)
+        self.file_browser_tree.bind("<<TreeviewSelect>>", self._on_file_browser_selected)
+        self.file_browser_tree.bind("<Double-1>", self._on_file_browser_selected)
 
         ttk.Label(right, text="Editor").pack(anchor=tk.W)
         editor_header = ttk.Frame(right)
@@ -2811,6 +3208,11 @@ class ValidatorApp:
         self.editor_text.tag_configure("syntax_key", foreground="#047857")
         self.editor_text.bind("<<Modified>>", self._on_editor_modified)
         self.editor_text.bind("<KeyRelease>", self._on_editor_cursor_changed, add="+")
+        self.editor_text.bind("<Motion>", self._on_editor_mouse_motion, add="+")
+        self.editor_text.bind("<Leave>", self._on_editor_mouse_leave, add="+")
+        self.editor_text.bind("<ButtonPress-1>", self._on_editor_mouse_leave, add="+")
+        self.editor_text.bind("<ButtonPress-2>", self._on_editor_mouse_leave, add="+")
+        self.editor_text.bind("<ButtonPress-3>", self._on_editor_mouse_leave, add="+")
         self.editor_text.bind("<ButtonRelease-1>", self._on_editor_clicked, add="+")
         self.editor_text.bind("<ButtonRelease-2>", self._on_editor_clicked, add="+")
         self.editor_text.bind("<ButtonRelease-3>", self._on_editor_clicked, add="+")
@@ -2917,6 +3319,9 @@ class ValidatorApp:
     def _tree_tags_for_object(self, obj: StartupObject) -> Tuple[str, ...]:
         return ("node-object", "kind-{}".format(obj.kind))
 
+    def _object_tree_key(self, obj: StartupObject) -> Tuple[Path, int, str, str]:
+        return (obj.source.resolve(), obj.line, obj.kind, obj.title)
+
     def _on_editor_scrollbar(self, *args) -> None:
         self.editor_text.yview(*args)
         self.editor_gutter.yview(*args)
@@ -2932,7 +3337,107 @@ class ValidatorApp:
             self.editor_search_entry.selection_range(0, "end")
         return "break"
 
+    def _enable_combobox_filter(self, combobox, values: List[str]) -> None:
+        all_values = list(values)
+
+        def refresh(_event=None) -> None:
+            current = combobox.get().strip().lower()
+            if not current:
+                filtered = all_values
+            else:
+                startswith_matches = [value for value in all_values if value.lower().startswith(current)]
+                contains_matches = [
+                    value for value in all_values if current in value.lower() and value not in startswith_matches
+                ]
+                filtered = startswith_matches + contains_matches
+            combobox.configure(values=filtered)
+
+        combobox.bind("<KeyRelease>", refresh, add="+")
+        combobox.bind("<Button-1>", refresh, add="+")
+        combobox.bind("<FocusIn>", refresh, add="+")
+
+    def _ensure_editor_macro_tooltip(self) -> None:
+        if self.editor_macro_tooltip is not None and self.editor_macro_tooltip.winfo_exists():
+            return
+        tooltip = self.tk.Toplevel(self.root)
+        tooltip.withdraw()
+        tooltip.overrideredirect(True)
+        tooltip.transient(self.root)
+        tooltip.configure(background="#d8c7a3")
+        label = self.tk.Label(
+            tooltip,
+            text="",
+            justify=self.tk.LEFT,
+            anchor=self.tk.W,
+            background="#fff8dd",
+            padx=8,
+            pady=4,
+        )
+        label.pack(fill=self.tk.BOTH, expand=True)
+        self.editor_macro_tooltip = tooltip
+        self.editor_macro_tooltip_label = label
+
+    def _hide_editor_macro_tooltip(self) -> None:
+        if self._editor_macro_hover_job is not None:
+            try:
+                self.root.after_cancel(self._editor_macro_hover_job)
+            except Exception:
+                pass
+        self._editor_macro_hover_job = None
+        self._editor_macro_hover_token = None
+        self._editor_macro_hover_event = None
+        if self.editor_macro_tooltip is not None and self.editor_macro_tooltip.winfo_exists():
+            self.editor_macro_tooltip.withdraw()
+
+    def _editor_macro_hover_context(self, event) -> Optional[Tuple[str, str]]:
+        if self.current_edit_path is None:
+            return None
+        try:
+            index = self.editor_text.index("@{},{}".format(event.x, event.y))
+        except Exception:
+            return None
+        line_no, column_no = [int(part) for part in index.split(".")]
+        line_text = self.editor_text.get("{}.0".format(line_no), "{}.0 lineend".format(line_no))
+        for match in re.finditer(r"\$\{[^}\n]+\}|\$\([^\)\n]+\)", line_text):
+            if not (match.start() <= column_no < match.end()):
+                continue
+            token = match.group(0)
+            inner = token[2:-1]
+            name, has_default, default = inner.partition("=")
+            name = name.strip()
+            if not name:
+                return None
+            macro_map = self._editor_known_macro_map()
+            value = macro_map.get(name)
+            if value is None or value == "":
+                value = default.strip() if has_default else "<unset>"
+            else:
+                value = str(value)
+            return token, "{} = {}".format(name, value)
+        return None
+
+    def _show_editor_macro_tooltip(self) -> None:
+        self._editor_macro_hover_job = None
+        if self._editor_macro_hover_event is None:
+            return
+        context = self._editor_macro_hover_context(self._editor_macro_hover_event)
+        if context is None:
+            self._hide_editor_macro_tooltip()
+            return
+        token, text = context
+        self._editor_macro_hover_token = token
+        self._ensure_editor_macro_tooltip()
+        if self.editor_macro_tooltip is None or self.editor_macro_tooltip_label is None:
+            return
+        self.editor_macro_tooltip_label.configure(text=text)
+        x = self.editor_text.winfo_rootx() + self._editor_macro_hover_event.x + 16
+        y = self.editor_text.winfo_rooty() + self._editor_macro_hover_event.y + 20
+        self.editor_macro_tooltip.geometry("+{}+{}".format(x, y))
+        self.editor_macro_tooltip.deiconify()
+        self.editor_macro_tooltip.lift()
+
     def _set_editor_content(self, content: str, line: Optional[int] = None) -> None:
+        self._hide_editor_macro_tooltip()
         self._hide_editor_completion()
         self.editor_text.delete("1.0", "end")
         self.editor_text.insert("1.0", content)
@@ -2961,25 +3466,63 @@ class ValidatorApp:
         self._update_editor_completion(self._editor_completion_forced or self._editor_completion_should_open)
         self._editor_completion_forced = False
         self._editor_completion_should_open = False
+
+    def _schedule_tree_sync_from_editor(self, delay_ms: int = 120) -> None:
+        if self._editor_tree_sync_job is not None:
+            try:
+                self.root.after_cancel(self._editor_tree_sync_job)
+            except Exception:
+                pass
+        self._editor_tree_sync_job = self.root.after(delay_ms, self._run_tree_sync_from_editor)
+
+    def _run_tree_sync_from_editor(self) -> None:
+        self._editor_tree_sync_job = None
         self._sync_tree_selection_from_editor()
 
     def _on_editor_modified(self, _event=None) -> None:
         if not self.editor_text.edit_modified():
             return
+        self._hide_editor_macro_tooltip()
         if self.current_edit_path is not None:
             self.file_buffers[self.current_edit_path] = self.editor_text.get("1.0", "end-1c")
         self.editor_text.edit_modified(False)
         self._schedule_editor_update()
+        self._schedule_tree_sync_from_editor(140)
 
     def _on_editor_cursor_changed(self, _event=None) -> None:
         keysym = getattr(_event, "keysym", "")
         char = getattr(_event, "char", "")
+        self._hide_editor_macro_tooltip()
         self._editor_completion_should_open = bool(char and (char.isalnum() or char in "._"))
         self._schedule_editor_update()
+        self._schedule_tree_sync_from_editor(140)
 
     def _on_editor_clicked(self, _event=None) -> None:
+        self._hide_editor_macro_tooltip()
         self._editor_completion_should_open = False
         self._schedule_editor_update()
+        self._schedule_tree_sync_from_editor(260)
+
+    def _on_editor_mouse_motion(self, event=None) -> None:
+        if event is None:
+            return
+        context = self._editor_macro_hover_context(event)
+        if context is None:
+            self._hide_editor_macro_tooltip()
+            return
+        token, _text = context
+        if self._editor_macro_hover_token == token and self.editor_macro_tooltip is not None:
+            x = self.editor_text.winfo_rootx() + event.x + 16
+            y = self.editor_text.winfo_rooty() + event.y + 20
+            self.editor_macro_tooltip.geometry("+{}+{}".format(x, y))
+            return
+        self._hide_editor_macro_tooltip()
+        self._editor_macro_hover_token = token
+        self._editor_macro_hover_event = event
+        self._editor_macro_hover_job = self.root.after(350, self._show_editor_macro_tooltip)
+
+    def _on_editor_mouse_leave(self, _event=None) -> None:
+        self._hide_editor_macro_tooltip()
 
     def _show_editor_completion_on_demand(self, _event=None) -> str:
         self._editor_completion_forced = True
@@ -3272,6 +3815,12 @@ class ValidatorApp:
     def _linked_object_for_current_editor(self) -> Optional[StartupObject]:
         if self.current_edit_path is None or self.latest_startup_tree is None:
             return None
+        if self.current_edit_linked_object_key is not None:
+            target_key = self.current_edit_linked_object_key
+            for file_node in self.latest_startup_tree.files:
+                for obj in file_node.objects:
+                    if self._object_tree_key(obj) == target_key:
+                        return obj
         target = self.current_edit_path.resolve()
         for file_node in self.latest_startup_tree.files:
             for obj in file_node.objects:
@@ -3529,8 +4078,14 @@ class ValidatorApp:
             self._select_tree_item_silently(self.object_tree_items[object_key])
             return
 
+        if self.current_edit_linked_object_key is not None:
+            linked_item = self.linked_file_item_by_object_key.get(self.current_edit_linked_object_key)
+            if linked_item is not None:
+                self._select_tree_item_silently(linked_item)
+                return
+
         linked_items = self.linked_file_tree_items.get(current_path, [])
-        if linked_items:
+        if len(linked_items) == 1:
             self._select_tree_item_silently(linked_items[0])
             return
 
@@ -3585,7 +4140,12 @@ class ValidatorApp:
             return
         self.file_buffers[self.current_edit_path] = self.editor_text.get("1.0", "end-1c")
 
-    def _open_file_in_editor(self, path: Path, line: Optional[int] = None) -> None:
+    def _open_file_in_editor(
+        self,
+        path: Path,
+        line: Optional[int] = None,
+        linked_object_key: Optional[Tuple[Path, int, str, str]] = None,
+    ) -> None:
         from tkinter import messagebox
 
         resolved = path.resolve()
@@ -3602,8 +4162,10 @@ class ValidatorApp:
 
         self.current_edit_path = resolved
         self._last_editor_sync_location = None
+        self.current_edit_linked_object_key = linked_object_key
         self.editor_file_var.set(str(resolved))
         self._set_editor_content(content, line=line)
+        self._sync_file_browser_selection(resolved)
         self.status_var.set(f"Opened {resolved.name}")
 
     def _highlight_editor_line(self, line: Optional[int]) -> None:
@@ -3700,6 +4262,7 @@ class ValidatorApp:
             buffer_lookup=self.file_buffers,
         )
         self._populate_startup_tree(startup_path, self.latest_startup_tree)
+        self._populate_file_browser(startup_path)
         self.status_var.set(f"Loaded {startup_path.name}")
 
     def _validate_current_project(self) -> None:
@@ -3743,6 +4306,7 @@ class ValidatorApp:
         self.startup_item_map.clear()
         self.object_tree_items.clear()
         self.linked_file_tree_items.clear()
+        self.linked_file_item_by_object_key.clear()
         self.file_tree_items.clear()
         self.startup_tree.delete(*self.startup_tree.get_children(""))
         self.param_tree.delete(*self.param_tree.get_children(""))
@@ -3788,7 +4352,8 @@ class ValidatorApp:
                     tags=self._tree_tags_for_object(obj),
                 )
                 self.startup_item_map[obj_item] = ("object", obj)
-                self.object_tree_items[(obj.source.resolve(), obj.line, obj.kind, obj.title)] = obj_item
+                object_key = self._object_tree_key(obj)
+                self.object_tree_items[object_key] = obj_item
                 if obj.kind == "slave" and obj.slave_id is not None:
                     slave_items[obj.slave_id] = obj_item
                 if obj.kind == "axis":
@@ -3816,6 +4381,7 @@ class ValidatorApp:
                     )
                     self.startup_item_map[link_item] = ("linked-file", obj)
                     self.linked_file_tree_items.setdefault(obj.linked_file.resolve(), []).append(link_item)
+                    self.linked_file_item_by_object_key[object_key] = link_item
 
                 detail_skip = set()
                 if obj.linked_file is not None:
@@ -3899,6 +4465,82 @@ class ValidatorApp:
         self.param_tree.delete(*self.param_tree.get_children(""))
         for key, value in rows:
             self.param_tree.insert("", "end", text=key, values=(value,))
+
+    def _file_browser_root_for_startup(self, startup_path: Path) -> Path:
+        return startup_path.resolve().parent
+
+    def _populate_file_browser(self, startup_path: Path) -> None:
+        if self.file_browser_tree is None:
+            return
+        root_path = self._file_browser_root_for_startup(startup_path)
+        self.file_browser_root = root_path
+        self.file_browser_item_paths.clear()
+        self.file_browser_tree.delete(*self.file_browser_tree.get_children(""))
+
+        def add_node(parent_item: str, path: Path) -> None:
+            try:
+                children = sorted(
+                    path.iterdir(),
+                    key=lambda child: (not child.is_dir(), child.name.lower()),
+                )
+            except Exception:
+                return
+
+            for child in children:
+                if child.name.startswith("."):
+                    continue
+                item_type = "DIR" if child.is_dir() else child.suffix.lower().lstrip(".").upper() or "FILE"
+                item_id = self.file_browser_tree.insert(
+                    parent_item,
+                    "end",
+                    text=child.name,
+                    values=(item_type,),
+                    open=False,
+                )
+                self.file_browser_item_paths[item_id] = child.resolve()
+                if child.is_dir():
+                    add_node(item_id, child)
+
+        root_label = root_path.name or str(root_path)
+        root_item = self.file_browser_tree.insert(
+            "",
+            "end",
+            text=root_label,
+            values=("DIR",),
+            open=True,
+        )
+        self.file_browser_item_paths[root_item] = root_path
+        add_node(root_item, root_path)
+        self.file_browser_tree.selection_set(root_item)
+        self.file_browser_tree.focus(root_item)
+        self.file_browser_tree.see(root_item)
+
+    def _sync_file_browser_selection(self, path: Optional[Path]) -> None:
+        if self.file_browser_tree is None or path is None:
+            return
+        resolved = path.resolve()
+        for item_id, item_path in self.file_browser_item_paths.items():
+            if item_path == resolved:
+                current = self.file_browser_tree.selection()
+                if current and current[0] == item_id:
+                    return
+                self.file_browser_tree.selection_set(item_id)
+                self.file_browser_tree.focus(item_id)
+                self.file_browser_tree.see(item_id)
+                return
+
+    def _on_file_browser_selected(self, _event=None) -> None:
+        if self.file_browser_tree is None:
+            return
+        selected = self.file_browser_tree.selection()
+        if not selected:
+            return
+        path = self.file_browser_item_paths.get(selected[0])
+        if path is None or path.is_dir():
+            return
+        if self.current_edit_path == path.resolve():
+            return
+        self._open_file_in_editor(path)
 
     def _selected_startup_entry(self) -> Optional[Tuple[str, object]]:
         selected = self.startup_tree.selection()
@@ -4354,11 +4996,347 @@ class ValidatorApp:
             values["FILE"] = self._relative_display(obj.linked_file)
         return values
 
+    def _available_slave_hw_descs(self) -> List[str]:
+        excluded_dirs = {"Encoders", "Motors", "Sensors"}
+        allowed: List[str] = []
+        for file_name, paths in self.inventory.hardware_configs.items():
+            stem = Path(file_name).stem
+            if not stem.lower().startswith("ecmc") or len(stem) <= 4:
+                continue
+            hw_desc = stem[4:]
+            if hw_desc not in self.inventory.hardware_descs:
+                continue
+            exclude = False
+            for path in paths:
+                if self.inventory.ecmccfg_root is None:
+                    continue
+                try:
+                    relative = path.resolve().relative_to((self.inventory.ecmccfg_root / "hardware").resolve())
+                except Exception:
+                    continue
+                if relative.parts and relative.parts[0] in excluded_dirs:
+                    exclude = True
+                    break
+            if not exclude:
+                allowed.append(hw_desc)
+        return sorted(set(allowed))
+
+    def _default_insert_slave_id(self, target_path: Path, content: str, insert_line: int) -> str:
+        objects, _nested = _extract_startup_objects_from_file(
+            target_path.resolve(),
+            content,
+            self.inventory,
+            self.file_buffers,
+        )
+        previous_slave_id: Optional[int] = None
+        previous_slave_line = -1
+        for obj in objects:
+            if obj.kind != "slave" or obj.slave_id is None:
+                continue
+            if obj.line < insert_line and obj.line > previous_slave_line:
+                previous_slave_line = obj.line
+                previous_slave_id = obj.slave_id
+        if previous_slave_id is None:
+            return "0"
+        return str(previous_slave_id + 1)
+
     def _selected_editable_object(self) -> Optional[StartupObject]:
         entry = self._selected_startup_entry()
         if entry is None or entry[0] != "object":
             return None
         return entry[1]
+
+    def _find_slave_object(self, source: Path, slave_id: Optional[int]) -> Optional[StartupObject]:
+        if slave_id is None or self.latest_startup_tree is None:
+            return None
+        resolved_source = source.resolve()
+        for file_node in self.latest_startup_tree.files:
+            for obj in file_node.objects:
+                if obj.kind != "slave" or obj.slave_id != slave_id:
+                    continue
+                if obj.source.resolve() == resolved_source:
+                    return obj
+        return None
+
+    def _context_slave_for_component_dialog(self) -> Optional[StartupObject]:
+        entry = self._selected_startup_entry()
+        if entry is None:
+            return None
+        entry_type, payload = entry
+        if entry_type == "file" or not isinstance(payload, StartupObject):
+            return None
+        if payload.kind == "slave":
+            return payload
+        if payload.kind == "component":
+            return self._find_slave_object(payload.source, payload.parent_slave_id)
+        return None
+
+    def _component_dialog_context(self, initial_values: Dict[str, str]) -> Dict[str, object]:
+        slave_obj = self._context_slave_for_component_dialog()
+        hw_desc = ""
+        default_slave_id = initial_values.get("COMP_S_ID", "")
+        if slave_obj is not None:
+            hw_desc = dict(slave_obj.details).get("HW_DESC", "").strip()
+            if not default_slave_id and slave_obj.slave_id is not None:
+                default_slave_id = str(slave_obj.slave_id)
+        comp_hw_type = initial_values.get("EC_COMP_TYPE", "").strip()
+        if not comp_hw_type:
+            comp_hw_type = self.inventory.hardware_component_types.get(hw_desc, hw_desc)
+        support_map = self.inventory.component_support.get(comp_hw_type, {})
+        supported_components = sorted(
+            definition.name
+            for definition in self.inventory.component_definitions.values()
+            if definition.comp_type in support_map
+        )
+        initial_component = initial_values.get("COMP", "").strip()
+        if initial_component and initial_component not in supported_components:
+            supported_components.append(initial_component)
+            supported_components.sort()
+        return {
+            "slave_obj": slave_obj,
+            "hw_desc": hw_desc,
+            "comp_hw_type": comp_hw_type,
+            "default_slave_id": default_slave_id,
+            "support_map": support_map,
+            "supported_components": supported_components,
+        }
+
+    def _prompt_for_component_values(self, initial_values: Dict[str, str]) -> Optional[str]:
+        from tkinter import messagebox
+
+        tk = self.tk
+        ttk = self.ttk
+        context = self._component_dialog_context(initial_values)
+        hw_desc = str(context["hw_desc"])
+        comp_hw_type = str(context["comp_hw_type"])
+        support_map = dict(context["support_map"])
+        supported_components = list(context["supported_components"])
+        is_add_from_slave = context["slave_obj"] is not None and not initial_values.get("COMP", "").strip()
+
+        if is_add_from_slave and self.inventory.component_support and not support_map:
+            messagebox.showinfo(
+                "No supported components",
+                "No component support was found in ecmccomp for HW_DESC '{}' (EC_COMP_TYPE '{}').".format(
+                    hw_desc or "<unknown>",
+                    comp_hw_type or "<unset>",
+                ),
+            )
+            return None
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Add Component")
+        dialog.transient(self.root)
+        dialog.withdraw()
+
+        comp_var = tk.StringVar(value=initial_values.get("COMP", supported_components[0] if supported_components else ""))
+        ec_comp_type_var = tk.StringVar(value=comp_hw_type)
+        comp_s_id_var = tk.StringVar(value=initial_values.get("COMP_S_ID", str(context["default_slave_id"])))
+        ch_id_var = tk.StringVar(value=initial_values.get("CH_ID", "1"))
+        macros_var = tk.StringVar(value=initial_values.get("MACROS", ""))
+        slave_var = tk.StringVar(
+            value="{} -> {}".format(hw_desc or "<unknown HW_DESC>", comp_hw_type or "<unset>")
+            if hw_desc or comp_hw_type
+            else "No slave selected"
+        )
+        supported_types_var = tk.StringVar(value="")
+        component_type_var = tk.StringVar(value="")
+        supported_macros_var = tk.StringVar(value="")
+        channels_var = tk.StringVar(value="")
+        warning_var = tk.StringVar(value="")
+        result: Dict[str, Optional[str]] = {"command": None}
+
+        ttk.Label(dialog, text="Slave").grid(row=0, column=0, sticky=tk.NW, padx=8, pady=4)
+        ttk.Label(dialog, textvariable=slave_var, justify=tk.LEFT, wraplength=460).grid(
+            row=0, column=1, sticky=tk.W, padx=8, pady=4
+        )
+
+        ttk.Label(dialog, text="EC_COMP_TYPE").grid(row=1, column=0, sticky=tk.W, padx=8, pady=4)
+        ec_comp_type_widget = ttk.Combobox(
+            dialog,
+            textvariable=ec_comp_type_var,
+            values=sorted(self.inventory.component_support.keys()),
+            width=48,
+        )
+        ec_comp_type_widget.grid(row=1, column=1, sticky=tk.EW, padx=8, pady=4)
+
+        ttk.Label(dialog, text="Supported types").grid(row=2, column=0, sticky=tk.NW, padx=8, pady=4)
+        ttk.Label(dialog, textvariable=supported_types_var, justify=tk.LEFT, wraplength=460).grid(
+            row=2, column=1, sticky=tk.W, padx=8, pady=4
+        )
+
+        ttk.Label(dialog, text="COMP").grid(row=3, column=0, sticky=tk.W, padx=8, pady=4)
+        comp_widget = ttk.Combobox(dialog, textvariable=comp_var, values=supported_components, width=48)
+        if supported_components:
+            comp_widget.configure(state="readonly")
+        comp_widget.grid(row=3, column=1, sticky=tk.EW, padx=8, pady=4)
+
+        ttk.Label(dialog, text="Resolved type").grid(row=4, column=0, sticky=tk.NW, padx=8, pady=4)
+        ttk.Label(dialog, textvariable=component_type_var, justify=tk.LEFT, wraplength=460).grid(
+            row=4, column=1, sticky=tk.W, padx=8, pady=4
+        )
+
+        ttk.Label(dialog, text="COMP_S_ID").grid(row=5, column=0, sticky=tk.W, padx=8, pady=4)
+        comp_s_id_widget = ttk.Entry(dialog, textvariable=comp_s_id_var, width=52)
+        comp_s_id_widget.grid(row=5, column=1, sticky=tk.EW, padx=8, pady=4)
+
+        ttk.Label(dialog, text="CH_ID").grid(row=6, column=0, sticky=tk.W, padx=8, pady=4)
+        ch_id_widget = ttk.Entry(dialog, textvariable=ch_id_var, width=52)
+        ch_id_widget.grid(row=6, column=1, sticky=tk.EW, padx=8, pady=4)
+
+        ttk.Label(dialog, text="Allowed macros").grid(row=7, column=0, sticky=tk.NW, padx=8, pady=4)
+        ttk.Label(dialog, textvariable=supported_macros_var, justify=tk.LEFT, wraplength=460).grid(
+            row=7, column=1, sticky=tk.W, padx=8, pady=4
+        )
+
+        ttk.Label(dialog, text="Channels").grid(row=8, column=0, sticky=tk.NW, padx=8, pady=4)
+        ttk.Label(dialog, textvariable=channels_var, justify=tk.LEFT, wraplength=460).grid(
+            row=8, column=1, sticky=tk.W, padx=8, pady=4
+        )
+
+        ttk.Label(dialog, text="MACROS").grid(row=9, column=0, sticky=tk.W, padx=8, pady=4)
+        macros_widget = ttk.Entry(dialog, textvariable=macros_var, width=52)
+        macros_widget.grid(row=9, column=1, sticky=tk.EW, padx=8, pady=4)
+
+        warning_label = ttk.Label(dialog, textvariable=warning_var, justify=tk.LEFT, foreground="#8b5e00", wraplength=460)
+        warning_label.grid(row=10, column=0, columnspan=2, sticky=tk.W, padx=8, pady=(0, 4))
+
+        def refresh_component_context(*_args) -> None:
+            current_ec_comp_type = ec_comp_type_var.get().strip()
+            current_support_map = self.inventory.component_support.get(current_ec_comp_type, {})
+            type_names = sorted(current_support_map.keys())
+            supported_types_var.set(", ".join(type_names) if type_names else "No component types found in ecmccomp")
+
+            current_components = sorted(
+                definition.name
+                for definition in self.inventory.component_definitions.values()
+                if definition.comp_type in current_support_map
+            )
+            current_component = comp_var.get().strip()
+            if current_components:
+                if current_component and current_component not in current_components:
+                    comp_widget.configure(values=current_components + [current_component], state="normal")
+                else:
+                    comp_widget.configure(values=current_components, state="readonly")
+                    if current_component not in current_components:
+                        comp_var.set(current_components[0])
+            else:
+                comp_widget.configure(values=(), state="normal")
+
+            component_name = comp_var.get().strip()
+            definition = self.inventory.component_definitions.get(component_name)
+            component_type = definition.comp_type if definition is not None else ""
+            component_type_var.set(component_type or "Unknown component type")
+
+            support = current_support_map.get(component_type) if component_type else None
+            if support is not None and support.supported_macros:
+                supported_macros_var.set(", ".join(sorted(support.supported_macros)))
+            elif support is not None:
+                supported_macros_var.set("(no special macros)")
+            else:
+                supported_macros_var.set("No macro information available")
+
+            if support is not None and support.channel_count is not None:
+                channels_var.set(str(support.channel_count))
+            elif support is not None:
+                channels_var.set("Unknown")
+            else:
+                channels_var.set("-")
+
+            if definition is None and component_name:
+                warning_var.set("Component '{}' was not found in ecmccomp.".format(component_name))
+            elif component_type and component_type not in current_support_map:
+                warning_var.set(
+                    "Component type '{}' is not supported by EC_COMP_TYPE '{}'.".format(
+                        component_type,
+                        current_ec_comp_type or "<unset>",
+                    )
+                )
+            else:
+                warning_var.set("")
+
+        def submit() -> None:
+            component_name = comp_var.get().strip()
+            current_ec_comp_type = ec_comp_type_var.get().strip()
+            current_support_map = self.inventory.component_support.get(current_ec_comp_type, {})
+            definition = self.inventory.component_definitions.get(component_name)
+
+            if not component_name:
+                messagebox.showerror("Missing component", "Select a component.", parent=dialog)
+                return
+            if self.inventory.component_definitions and definition is None:
+                messagebox.showerror(
+                    "Unknown component",
+                    "Component '{}' was not found in ecmccomp.".format(component_name),
+                    parent=dialog,
+                )
+                return
+            if definition is not None and current_support_map and definition.comp_type not in current_support_map:
+                messagebox.showerror(
+                    "Unsupported component",
+                    "Component '{}' of type '{}' is not supported by EC_COMP_TYPE '{}'.".format(
+                        component_name,
+                        definition.comp_type,
+                        current_ec_comp_type or "<unset>",
+                    ),
+                    parent=dialog,
+                )
+                return
+
+            macro_pairs, malformed = _parse_macro_payload(macros_var.get().strip())
+            if malformed:
+                messagebox.showerror(
+                    "Invalid macros",
+                    "Could not parse: {}".format(", ".join(malformed)),
+                    parent=dialog,
+                )
+                return
+            if definition is not None:
+                support = current_support_map.get(definition.comp_type)
+                allowed_macros = support.supported_macros if support is not None else set()
+                invalid_macros = sorted(key for key, _value in macro_pairs if allowed_macros and key not in allowed_macros)
+                if invalid_macros:
+                    messagebox.showerror(
+                        "Unsupported macros",
+                        "These macros are not supported for {} on {}: {}".format(
+                            component_name,
+                            current_ec_comp_type or "<unset>",
+                            ", ".join(invalid_macros),
+                        ),
+                        parent=dialog,
+                    )
+                    return
+
+            items = [
+                ("COMP", component_name),
+                ("EC_COMP_TYPE", current_ec_comp_type),
+                ("COMP_S_ID", comp_s_id_var.get().strip()),
+                ("CH_ID", ch_id_var.get().strip()),
+                ("MACROS", macros_var.get().strip()),
+            ]
+            result["command"] = _render_startup_command("applyComponent.cmd", items)
+            dialog.destroy()
+
+        def cancel() -> None:
+            dialog.destroy()
+
+        ec_comp_type_var.trace_add("write", refresh_component_context)
+        comp_var.trace_add("write", refresh_component_context)
+        refresh_component_context()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=11, column=0, columnspan=2, sticky=tk.E, padx=8, pady=8)
+        ttk.Button(button_frame, text="Cancel", command=cancel).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="Add", command=submit).pack(side=tk.RIGHT, padx=(0, 6))
+
+        dialog.columnconfigure(1, weight=1)
+        dialog.bind("<Escape>", lambda _event: cancel())
+        dialog.bind("<Return>", lambda _event: submit())
+        dialog.deiconify()
+        dialog.wait_visibility()
+        dialog.grab_set()
+        comp_widget.focus_set()
+        self.root.wait_window(dialog)
+        return result["command"]
 
     def _apply_object_update(self, obj: StartupObject, values: Dict[str, str]) -> bool:
         from tkinter import messagebox
@@ -4381,7 +5359,7 @@ class ValidatorApp:
         initial_values = initial_values or {}
 
         if kind == "slave":
-            hw_desc_values = sorted(self.inventory.hardware_descs)
+            hw_desc_values = self._available_slave_hw_descs()
             fields = [
                 ("HW_DESC", "HW_DESC", initial_values.get("HW_DESC", hw_desc_values[0] if hw_desc_values else ""), "combo", hw_desc_values),
                 ("SLAVE_ID", "SLAVE_ID", initial_values.get("SLAVE_ID", self._next_tree_id("slave", "SLAVE_ID")), "entry", None),
@@ -4439,20 +5417,7 @@ class ValidatorApp:
             ]
             script_name = "loadPLCFile.cmd"
         elif kind == "component":
-            default_slave_id = ""
-            entry = self._selected_startup_entry()
-            if entry is not None:
-                entry_type, payload = entry
-                if entry_type != "file":
-                    default_slave_id = str(payload.slave_id or payload.parent_slave_id or "")
-            fields = [
-                ("COMP", "COMP", initial_values.get("COMP", ""), "entry", None),
-                ("EC_COMP_TYPE", "EC_COMP_TYPE", initial_values.get("EC_COMP_TYPE", ""), "entry", None),
-                ("COMP_S_ID", "COMP_S_ID", initial_values.get("COMP_S_ID", default_slave_id), "entry", None),
-                ("CH_ID", "CH_ID", initial_values.get("CH_ID", "1"), "entry", None),
-                ("MACROS", "MACROS", initial_values.get("MACROS", ""), "entry", None),
-            ]
-            script_name = "applyComponent.cmd"
+            return self._prompt_for_component_values(initial_values)
         elif kind == "plugin":
             fields = [
                 ("FILE", "Plugin file", initial_values.get("FILE", "./ecmcPlugin.so"), "entry", None),
@@ -4556,6 +5521,8 @@ class ValidatorApp:
             vars_by_name[name] = var
             if widget_kind == "combo":
                 widget = ttk.Combobox(dialog, textvariable=var, values=values or [], width=48)
+                if kind == "slave" and name == "HW_DESC":
+                    self._enable_combobox_filter(widget, list(values or []))
             else:
                 widget = ttk.Entry(dialog, textvariable=var, width=52)
             widget.grid(row=row, column=1, sticky=tk.EW, padx=8, pady=4)
@@ -4754,9 +5721,20 @@ class ValidatorApp:
             messagebox.showerror("File missing", "Cannot update missing file:\n{}".format(resolved_target))
             return
 
-        insert_text = self._prompt_for_object_values(kind)
+        initial_values: Dict[str, str] = {}
+        if kind == "slave":
+            lines = content.splitlines(True)
+            if target_line is None:
+                insert_at = len(lines)
+            else:
+                insert_at = max(0, min(len(lines), target_line - 1 + (0 if before_selected else 1)))
+            initial_values["SLAVE_ID"] = self._default_insert_slave_id(resolved_target, content, insert_at + 1)
+
+        insert_text = self._prompt_for_object_values(kind, initial_values=initial_values)
         if not insert_text:
             return
+        if kind == "slave":
+            insert_text = insert_text.rstrip("\n") + "\n\n"
 
         created_file = self._ensure_object_file_exists(kind, insert_text, resolved_target)
 
@@ -5015,7 +5993,7 @@ class ValidatorApp:
             return
 
         if entry_type in {"linked-file", "linked-detail", "linked-detail-group"} and obj.linked_file is not None and obj.linked_file.exists():
-            self._open_file_in_editor(obj.linked_file)
+            self._open_file_in_editor(obj.linked_file, linked_object_key=self._object_tree_key(obj))
         else:
             self._open_file_in_editor(obj.source, line=obj.line)
 
