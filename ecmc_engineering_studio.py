@@ -3273,6 +3273,7 @@ class ValidatorApp:
         self.root.configure(background="#f3efe7")
         style.configure(".", font=("Helvetica", 12))
         style.configure("Toolbar.TButton", padding=(10, 6))
+        style.configure("ObjectAction.TButton", font=("Helvetica", 10), padding=(2, 2))
         style.configure("Section.TLabel", font=("Helvetica", 13, "bold"))
         style.configure("Muted.TLabel", foreground="#5f6a77")
         style.configure("Treeview", rowheight=24)
@@ -3356,64 +3357,60 @@ class ValidatorApp:
 
         self.object_action_frame = ttk.Frame(lower_left)
         self.object_action_frame.pack(fill=tk.X, pady=(0, 6))
-        action_row_top = ttk.Frame(self.object_action_frame)
-        action_row_bottom = ttk.Frame(self.object_action_frame)
-        action_row_top.pack(fill=tk.X)
-        action_row_bottom.pack(fill=tk.X, pady=(6, 0))
         self.edit_object_button = ttk.Button(
-            action_row_top,
+            self.object_action_frame,
             text="Edit",
             command=self._edit_selected_tree_entry,
-            style="Toolbar.TButton",
+            style="ObjectAction.TButton",
         )
         self.edit_object_button.pack(side=tk.LEFT)
         self.add_macro_button = ttk.Button(
-            action_row_top,
-            text="Add Macro",
+            self.object_action_frame,
+            text="Macro",
             command=self._add_inline_macro,
-            style="Toolbar.TButton",
+            style="ObjectAction.TButton",
         )
         self.add_macro_button.pack(side=tk.LEFT, padx=(6, 0))
         self.open_object_file_button = ttk.Button(
-            action_row_top,
-            text="Open File",
+            self.object_action_frame,
+            text="Open",
             command=self._open_selected_object_file,
-            style="Toolbar.TButton",
+            style="ObjectAction.TButton",
         )
         self.open_object_file_button.pack(side=tk.LEFT, padx=(6, 0))
         self.move_up_button = ttk.Button(
-            action_row_top,
-            text="Move ↑",
+            self.object_action_frame,
+            text="↑",
             command=self._move_selected_object_up,
-            style="Toolbar.TButton",
+            style="ObjectAction.TButton",
         )
         self.move_up_button.pack(side=tk.LEFT, padx=(6, 0))
         self.move_down_button = ttk.Button(
-            action_row_bottom,
-            text="Move ↓",
+            self.object_action_frame,
+            text="↓",
             command=self._move_selected_object_down,
-            style="Toolbar.TButton",
+            style="ObjectAction.TButton",
         )
-        self.move_down_button.pack(side=tk.LEFT)
+        self.move_down_button.pack(side=tk.LEFT, padx=(6, 0))
         self.copy_object_button = ttk.Button(
-            action_row_bottom,
+            self.object_action_frame,
             text="Copy",
             command=self._copy_selected_object,
-            style="Toolbar.TButton",
+            style="ObjectAction.TButton",
         )
         self.copy_object_button.pack(side=tk.LEFT, padx=(6, 0))
         self.paste_object_button = ttk.Button(
-            action_row_bottom,
+            self.object_action_frame,
             text="Paste",
             command=self._paste_copied_object,
-            style="Toolbar.TButton",
+            style="ObjectAction.TButton",
         )
         self.paste_object_button.pack(side=tk.LEFT, padx=(6, 0))
         self.delete_object_button = ttk.Button(
-            action_row_bottom,
+            self.object_action_frame,
             text="Remove",
             command=self._remove_selected_object,
-            style="Toolbar.TButton",
+            style="ObjectAction.TButton",
         )
         self.delete_object_button.pack(side=tk.LEFT, padx=(6, 0))
 

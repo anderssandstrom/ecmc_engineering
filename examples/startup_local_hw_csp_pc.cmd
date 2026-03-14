@@ -18,5 +18,8 @@ epicsEnvSet(ENC_SID,${ECMC_EC_SLAVE_NUM})
 ${SCRIPTEXEC} ${ecmccfg_DIR}loadYamlAxis.cmd,   "FILE=./cfg/axis_csp.yaml,       DEV=${IOC}, AX_NAME=Axis1, AXIS_ID=1, DRV_SID=${DRV_SID}, ENC_SID=${ENC_SID}, ENC_CH=01"
 ${SCRIPTEXEC} ${ecmccfg_DIR}loadYamlEnc.cmd,    "FILE=./cfg/enc_open_loop.yaml,  DEV=${IOC}, ENC_SID=${DRV_SID}"
 
+${SCRIPTEXEC} ${ecmccfg_DIR}loadYamlAxis.cmd "FILE=./cfg/axis_csp.yaml, AX_NAME=Axis2, AXIS_ID=2, DRV_SID=9, ENC_SID=19, ENC_CH=01, DEV=${IOC}"
+${SCRIPTEXEC} ${ecmccfg_DIR}loadYamlEnc.cmd,    "FILE=./cfg/enc_open_loop.yaml,  DEV=${IOC}, ENC_SID=${DRV_SID}"
+
 #ecmcConfigOrDie "Cfg.SelectAxisEncCSPDrv(1,2)"
 
