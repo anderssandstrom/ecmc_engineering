@@ -1,0 +1,6 @@
+[submodule "ecmccfg"]
+	path = ecmccfg
+	url = git@github.com:paulscherrerinstitute/ecmccfg.git
+[submodule "ecmccomp"]
+	path = ecmccomp
+	url = git@github.com:paulscherrerinstitute/ecmccomp.git
