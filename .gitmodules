@@ -4,3 +4,6 @@
 [submodule "ecmccomp"]
 	path = ecmccomp
 	url = git@github.com:paulscherrerinstitute/ecmccomp.git
+[submodule "ecmc"]
+	path = ecmc
+	url = git@github.com:epics-modules/ecmc.git

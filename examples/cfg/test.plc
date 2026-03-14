@@ -1,0 +1,12 @@
+VAR
+  myPLC: ${SELF};
+  myAxis: ax1;
+  mySlave: ${M}.s${S_ID};
+END_VAR
+
+if(myPLC.firstscan){
+  println('Starting up!!!!');
+};
+
+println('position: ', mySlave.positionActual01);
+
