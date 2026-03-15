@@ -3969,6 +3969,8 @@ class ValidatorApp:
         self.selection_kind_badge = None
         self.selection_state_badge = None
         self.selection_source_badge = None
+        self.selection_key_badges: List[object] = []
+        self.selection_key_badge_actions: List[Optional[Tuple[str, object]]] = []
         self.help_state_badge = None
         self.help_summary_label = None
         self.editor_scrollbar = None
@@ -4069,6 +4071,8 @@ class ValidatorApp:
         style.configure("Section.TLabel", font=("Helvetica", 13, "bold"))
         style.configure("Muted.TLabel", foreground="#5f6a77")
         style.configure("HeaderNote.TLabel", foreground="#5f6a77", font=("Helvetica", 11))
+        style.configure("PanelTitle.TLabel", font=("Helvetica", 12, "bold"), foreground="#23384d")
+        style.configure("Hint.TLabel", foreground="#6a7280", font=("Helvetica", 10))
         style.configure("Treeview", rowheight=26)
         style.configure("Treeview.Heading", font=("Helvetica", 11, "bold"))
         style.map(
@@ -4076,7 +4080,8 @@ class ValidatorApp:
             background=[("selected", "#cfe0f6")],
             foreground=[("selected", "#1d2a35")],
         )
-        style.configure("TNotebook.Tab", padding=(10, 6))
+        style.configure("TNotebook", background="#f3efe7", tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", padding=(8, 5))
 
     def _build_ui(self) -> None:
         tk = self.tk
@@ -4260,8 +4265,15 @@ class ValidatorApp:
 
         self.startup_menu = tk.Menu(self.root, tearoff=0)
 
+        inspector_header = ttk.Frame(lower_left)
+        inspector_header.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(inspector_header, text="Inspector", style="PanelTitle.TLabel").pack(side=tk.LEFT)
+        ttk.Label(inspector_header, textvariable=self.object_action_hint_var, style="Hint.TLabel").pack(
+            side=tk.RIGHT, fill=tk.X, expand=True, padx=(12, 0)
+        )
+
         self.object_action_frame = ttk.Frame(lower_left)
-        self.object_action_frame.pack(fill=tk.X, pady=(0, 6))
+        self.object_action_frame.pack(fill=tk.X, pady=(0, 8))
         self.edit_object_button = ttk.Button(
             self.object_action_frame,
             text="Edit",
@@ -4318,14 +4330,13 @@ class ValidatorApp:
             style="ObjectAction.TButton",
         )
         self.delete_object_button.pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Label(lower_left, textvariable=self.object_action_hint_var, style="Muted.TLabel").pack(fill=tk.X, pady=(0, 6))
 
         self.param_notebook = ttk.Notebook(lower_left)
         self.param_notebook.pack(fill=tk.BOTH, expand=True)
 
-        param_frame = ttk.Frame(self.param_notebook)
+        param_frame = ttk.Frame(self.param_notebook, padding=(8, 8, 8, 8))
         self.param_notebook.add(param_frame, text="Details")
-        ttk.Label(param_frame, textvariable=self.selection_header_var, style="Section.TLabel").pack(
+        ttk.Label(param_frame, textvariable=self.selection_header_var, style="PanelTitle.TLabel").pack(
             side=tk.TOP, anchor=tk.W, pady=(0, 6)
         )
         selection_badge_frame = ttk.Frame(param_frame)
@@ -4357,6 +4368,22 @@ class ValidatorApp:
             foreground="#6a5b4d",
         )
         self.selection_source_badge.pack(side=tk.LEFT, padx=(6, 0))
+        selection_key_frame = ttk.Frame(param_frame)
+        selection_key_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
+        for index in range(4):
+            badge = tk.Label(
+                selection_key_frame,
+                text="",
+                padx=8,
+                pady=2,
+                background="#eef3e8",
+                foreground="#45603f",
+            )
+            badge.pack(side=tk.LEFT, padx=(0 if index == 0 else 6, 0))
+            badge.pack_forget()
+            badge.bind("<Button-1>", lambda _event, badge_index=index: self._on_selection_key_badge_clicked(badge_index))
+            self.selection_key_badges.append(badge)
+            self.selection_key_badge_actions.append(None)
         param_tree_frame = ttk.Frame(param_frame)
         param_tree_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.param_tree = ttk.Treeview(param_tree_frame, columns=("value",), show="tree headings")
@@ -4374,9 +4401,9 @@ class ValidatorApp:
         self.param_tree.bind("<Return>", self._edit_selected_parameter)
         self.param_tree.bind("<<TreeviewSelect>>", self._on_param_tree_selected)
 
-        quick_edit_frame = ttk.Frame(param_frame, padding=(0, 0, 0, 0))
+        quick_edit_frame = ttk.Frame(param_frame, padding=(0, 2, 0, 0))
         self.quick_edit_frame = quick_edit_frame
-        ttk.Label(quick_edit_frame, text="Quick Edit", style="Muted.TLabel").grid(row=0, column=0, sticky=tk.W, padx=(0, 6))
+        ttk.Label(quick_edit_frame, text="Field", style="Hint.TLabel").grid(row=0, column=0, sticky=tk.W, padx=(0, 6))
         self.quick_edit_key_combo = ttk.Combobox(
             quick_edit_frame,
             textvariable=self.quick_edit_key_var,
@@ -4410,11 +4437,11 @@ class ValidatorApp:
         quick_edit_frame.columnconfigure(3, weight=2)
         quick_edit_frame.pack_forget()
 
-        context_frame = ttk.Frame(self.param_notebook)
+        context_frame = ttk.Frame(self.param_notebook, padding=(8, 8, 8, 8))
         self.param_notebook.add(context_frame, text="Context")
         context_header = ttk.Frame(context_frame)
         context_header.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(context_header, text="Current Context", style="Section.TLabel").pack(side=tk.LEFT)
+        ttk.Label(context_header, text="Context", style="PanelTitle.TLabel").pack(side=tk.LEFT)
         self.context_open_button = ttk.Button(
             context_header,
             text="Open",
@@ -4464,7 +4491,7 @@ class ValidatorApp:
         resolved_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.resolved_text.configure(yscrollcommand=resolved_scroll.set)
 
-        help_frame = ttk.Frame(self.param_notebook)
+        help_frame = ttk.Frame(self.param_notebook, padding=(8, 8, 8, 8))
         self.param_notebook.add(help_frame, text="Help")
         help_header = ttk.Frame(help_frame)
         help_header.pack(fill=tk.X, pady=(0, 6))
@@ -4496,7 +4523,7 @@ class ValidatorApp:
             command=self._edit_selected_object,
         )
         self.help_edit_button.pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Label(help_header, text="Problems & Suggestions", style="Section.TLabel").pack(side=tk.LEFT)
+        ttk.Label(help_header, text="Suggestions", style="PanelTitle.TLabel").pack(side=tk.LEFT)
         self.help_state_badge = tk.Label(
             help_header,
             text="Info",
@@ -5250,6 +5277,137 @@ class ValidatorApp:
         self._configure_badge(self.selection_kind_badge, kind_text, kind_tone)
         self._configure_badge(self.selection_state_badge, state_text, state_tone)
         self._configure_badge(self.selection_source_badge, source_text, "neutral")
+        self._update_selection_key_badges(entry)
+
+    def _selection_key_badge_specs(
+        self, entry: Optional[Tuple[str, object]]
+    ) -> List[Tuple[str, str, Optional[Tuple[str, object]]]]:
+        if entry is None:
+            return []
+        entry_type, payload = entry
+        if entry_type == "file":
+            return [("Objects: {}".format(len(payload.objects)), "info", None)]
+        if entry_type == "category-group":
+            file_path, category, count = payload
+            return [
+                ("Category: {}".format(category), "info", None),
+                ("Count: {}".format(count), "neutral", None),
+            ]
+        if not isinstance(payload, StartupObject):
+            return []
+
+        obj = payload
+        detail_map = self._object_detail_map(obj)
+        specs: List[Tuple[str, str, Optional[Tuple[str, object]]]] = []
+
+        def add_spec(label: str, value: str, tone: str = "info", action: Optional[Tuple[str, object]] = None) -> None:
+            cleaned = str(value).strip()
+            if not cleaned:
+                return
+            display = cleaned
+            if len(display) > 34:
+                display = display[:31] + "..."
+            text = "{}: {}".format(label, display)
+            if text not in {existing for existing, _tone, _action in specs}:
+                specs.append((text, tone, action))
+
+        priority_keys = [
+            ("HW_DESC", "HW", "neutral", None),
+            ("SLAVE_ID", "Slave", "info", ("jump_slave", obj.slave_id)),
+            ("Parent Slave", "Slave", "info", ("jump_slave", obj.parent_slave_id)),
+            ("AXIS_ID", "Axis", "info", ("jump_axis", detail_map.get("AXIS_ID", ""))),
+            ("AX_NAME", "Name", "info", None),
+            ("ENC_SID", "Enc", "info", None),
+            ("PLC_ID", "PLC", "info", ("jump_plc", detail_map.get("PLC_ID", ""))),
+            ("COMP", "Comp", "neutral", ("edit_component", obj) if obj.kind == "component" else None),
+            ("CH_ID", "Ch", "info", None),
+            ("RATE_MS", "Rate", "info", None),
+            ("MODULE", "Module", "neutral", None),
+            ("COMMAND", "Cmd", "neutral", None),
+            ("CONFIG", "Config", "neutral", None),
+            ("LOCAL_CONFIG", "Local", "neutral", None),
+            ("LUT_ID", "LUT", "info", None),
+            ("DS_ID", "DS", "info", None),
+        ]
+        for key, label, tone, action in priority_keys:
+            add_spec(label, detail_map.get(key, ""), tone, action)
+
+        if obj.linked_file is not None:
+            add_spec("File", self._relative_display(obj.linked_file), "neutral", ("open_linked", obj))
+        elif "FILE" in detail_map:
+            add_spec("File", detail_map.get("FILE", ""), "neutral", None)
+        return specs[:4]
+
+    def _update_selection_key_badges(self, entry: Optional[Tuple[str, object]]) -> None:
+        specs = self._selection_key_badge_specs(entry)
+        for index, widget in enumerate(self.selection_key_badges):
+            if index < len(specs):
+                text, tone, action = specs[index]
+                self._configure_badge(widget, text, tone)
+                if action is not None:
+                    widget.configure(relief="raised", borderwidth=1)
+                else:
+                    widget.configure(relief="flat", borderwidth=0)
+                widget.configure(cursor="hand2" if action is not None else "")
+                self.selection_key_badge_actions[index] = action
+                if not widget.winfo_manager():
+                    widget.pack(side=self.tk.LEFT, padx=(0 if index == 0 else 6, 0))
+            elif widget.winfo_manager():
+                widget.pack_forget()
+                widget.configure(relief="flat", borderwidth=0)
+                widget.configure(cursor="")
+                self.selection_key_badge_actions[index] = None
+
+    def _on_selection_key_badge_clicked(self, index: int) -> str:
+        if index < 0 or index >= len(self.selection_key_badge_actions):
+            return "break"
+        action = self.selection_key_badge_actions[index]
+        if action is None:
+            return "break"
+        action_name, payload = action
+        if action_name == "open_linked" and isinstance(payload, StartupObject):
+            self._open_file_in_editor(payload.linked_file, linked_object_key=self._object_tree_key(payload))
+            return "break"
+        if action_name == "jump_slave":
+            entry = self._selected_startup_entry()
+            if entry is None or not isinstance(payload, int):
+                return "break"
+            entry_type, current_payload = entry
+            if entry_type == "file" or not isinstance(current_payload, StartupObject):
+                return "break"
+            slave_obj = self._find_slave_object(current_payload.source, payload)
+            if slave_obj is None:
+                return "break"
+            self._select_tree_object(slave_obj)
+            return "break"
+        if action_name == "jump_axis":
+            entry = self._selected_startup_entry()
+            if entry is None or not isinstance(payload, str):
+                return "break"
+            entry_type, current_payload = entry
+            if entry_type == "file" or not isinstance(current_payload, StartupObject):
+                return "break"
+            axis_obj = self._find_axis_object(current_payload.source, payload)
+            if axis_obj is None:
+                return "break"
+            self._select_tree_object(axis_obj)
+            return "break"
+        if action_name == "jump_plc":
+            entry = self._selected_startup_entry()
+            if entry is None or not isinstance(payload, str):
+                return "break"
+            entry_type, current_payload = entry
+            if entry_type == "file" or not isinstance(current_payload, StartupObject):
+                return "break"
+            plc_obj = self._find_plc_object(current_payload.source, payload)
+            if plc_obj is None:
+                return "break"
+            self._select_tree_object(plc_obj)
+            return "break"
+        if action_name == "edit_component" and isinstance(payload, StartupObject):
+            if self._select_tree_object(payload):
+                self._edit_selected_object()
+        return "break"
 
     def _update_help_header(self, entry: Optional[Tuple[str, object]]) -> None:
         issues = self._issues_for_entry(entry)
@@ -7816,7 +7974,7 @@ class ValidatorApp:
         editable_map = self._object_detail_map(obj)
         self.quick_edit_key_var.set(current_key)
         self.quick_edit_value_var.set(str(editable_map.get(current_key, "")))
-        self.quick_edit_hint_var.set("Updates the selected object directly.")
+        self.quick_edit_hint_var.set("Apply updates this field directly on the selected object.")
 
     def _refresh_resolved_preview(self) -> None:
         if self.current_edit_path is not None:
@@ -9145,6 +9303,42 @@ class ValidatorApp:
                 if obj.source.resolve() == resolved_source:
                     return obj
         return None
+
+    def _find_axis_object(self, source: Path, axis_id: str) -> Optional[StartupObject]:
+        cleaned_axis_id = str(axis_id).strip()
+        if not cleaned_axis_id or self.latest_startup_tree is None:
+            return None
+        resolved_source = source.resolve()
+        for file_node in self.latest_startup_tree.files:
+            for obj in file_node.objects:
+                if obj.kind != "axis" or obj.source.resolve() != resolved_source:
+                    continue
+                if dict(obj.details).get("AXIS_ID", "").strip() == cleaned_axis_id:
+                    return obj
+        return None
+
+    def _find_plc_object(self, source: Path, plc_id: str) -> Optional[StartupObject]:
+        cleaned_plc_id = str(plc_id).strip()
+        if not cleaned_plc_id or self.latest_startup_tree is None:
+            return None
+        resolved_source = source.resolve()
+        for file_node in self.latest_startup_tree.files:
+            for obj in file_node.objects:
+                if obj.kind != "plc" or obj.source.resolve() != resolved_source:
+                    continue
+                if dict(obj.details).get("PLC_ID", "").strip() == cleaned_plc_id:
+                    return obj
+        return None
+
+    def _select_tree_object(self, obj: StartupObject) -> bool:
+        target_item = self.object_tree_items.get(self._object_tree_key(obj))
+        if target_item is None:
+            return False
+        self.startup_tree.selection_set(target_item)
+        self.startup_tree.focus(target_item)
+        self.startup_tree.see(target_item)
+        self._on_startup_tree_selected()
+        return True
 
     def _context_slave_for_selected_entry(self) -> Optional[StartupObject]:
         entry = self._selected_startup_entry()

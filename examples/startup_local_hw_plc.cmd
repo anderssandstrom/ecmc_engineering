@@ -22,3 +22,5 @@ ${SCRIPTEXEC} ${ecmccfg_DIR}loadPLCFile.cmd     "FILE=./cfg/test.plc, SAMPLE_RAT
 
 ${SCRIPTEXEC} ${ecmccfg_DIR}addDataStorage.cmd  "DS_ID=1, DS_SIZE=1000"
 
+${SCRIPTEXEC} ${ecmccfg_DIR}addSlave.cmd "HW_DESC=EL4008, SLAVE_ID=10"
+
