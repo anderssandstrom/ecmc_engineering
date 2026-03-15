@@ -38,8 +38,10 @@ ${SCRIPTEXEC} ${ecmccfg_DIR}loadYamlEnc.cmd,    "FILE=./cfg/enc_open_loop.yaml, 
 
 ${SCRIPTEXEC} ${ecmccfg_DIR}setRecordUpdateRate.cmd "RATE_MS=1"
 
-ecmcConfigOrDie "Cfg.AddAxisToGroupByName(1, test, 1)"
+ecmcConfigOrDie "Cfg.AddAxisToGroupByName(1,test,1)"
 
 ${SCRIPTEXEC} ${ecmccfg_DIR}restoreRecordUpdateRate.cmd
+
+ecmcConfigOrDie "Cfg.EcAddSdoDT(uint16_t slave_position,uint16_t sdo_index, uint8_t sdo_subindex,char* value, char* datatype)"
 
 ecmcConfigOrDie "Cfg.EcAddSdoDT(uint16_t slave_position,uint16_t sdo_index, uint8_t sdo_subindex,char* value, char* datatype)"

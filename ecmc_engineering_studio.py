@@ -955,6 +955,16 @@ def _parse_int_value(value: str) -> Optional[int]:
         return None
 
 
+def _parse_float_value(value: str) -> Optional[float]:
+    cleaned = _strip_wrapper_pairs(_normalize_value(value))
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
 def _strip_wrapper_pairs(value: str) -> str:
     cleaned = value.strip()
     while len(cleaned) >= 2:
@@ -2388,6 +2398,80 @@ def _validate_single_file(
                         )
                     )
 
+        if module_script_name == "configureAxis.cmd":
+            cfg_macros_payload = expanded_key_map.get("CFG_MACROS", "").strip()
+            if cfg_macros_payload:
+                _cfg_macro_pairs, malformed_cfg_macros = _parse_macro_payload(cfg_macros_payload)
+                for malformed in malformed_cfg_macros:
+                    issues.append(
+                        ValidationIssue(
+                            severity="warning",
+                            source=path,
+                            line=line_no,
+                            message=f"Malformed CFG_MACROS segment for 'configureAxis.cmd': {malformed}",
+                        )
+                    )
+
+        if module_script_name == "loadSubstConfig.cmd":
+            subst_macros_payload = expanded_key_map.get("MACROS", "").strip()
+            if subst_macros_payload:
+                _subst_macro_pairs, malformed_subst_macros = _parse_macro_payload(subst_macros_payload)
+                for malformed in malformed_subst_macros:
+                    issues.append(
+                        ValidationIssue(
+                            severity="warning",
+                            source=path,
+                            line=line_no,
+                            message=f"Malformed MACROS segment for 'loadSubstConfig.cmd': {malformed}",
+                        )
+                    )
+
+        if module_script_name == "pvtControllerConfig.cmd":
+            trigger_entry = expanded_key_map.get("TRG_EC_ENTRY", "").strip()
+            if trigger_entry:
+                issues.extend(
+                    _validate_expanded_ec_links(
+                        [ExpandedTextLine(source=path, line=line_no, text=trigger_entry)],
+                        current_master_id,
+                        slave_hw_desc_by_id,
+                        inventory,
+                    )
+                )
+            trigger_duration = expanded_key_map.get("TRG_DUR_S", "").strip()
+            if (
+                trigger_duration
+                and "${" not in trigger_duration
+                and "$(" not in trigger_duration
+                and _parse_float_value(trigger_duration) is None
+            ):
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        source=path,
+                        line=line_no,
+                        message="TRG_DUR_S '{}' is not a valid numeric value for 'pvtControllerConfig.cmd'".format(
+                            trigger_duration
+                        ),
+                    )
+                )
+
+        if module_script_name == "loadLUTFile.cmd":
+            lut_id_value = expanded_key_map.get("LUT_ID", "").strip()
+            if (
+                lut_id_value
+                and "${" not in lut_id_value
+                and "$(" not in lut_id_value
+                and _parse_int_value(lut_id_value) is None
+            ):
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        source=path,
+                        line=line_no,
+                        message="LUT_ID '{}' is not a valid integer for 'loadLUTFile.cmd'".format(lut_id_value),
+                    )
+                )
+
         if module_script_name:
             module_matches = inventory.module_scripts.get(module_script_name, [])
             if not module_matches:
@@ -2646,6 +2730,8 @@ def _render_startup_command(script_name: str, items: List[Tuple[str, str]]) -> s
             continue
         rendered.append("{}={}".format(key, _quote_startup_value(cleaned)))
     payload = ", ".join(rendered)
+    if not payload:
+        return "${SCRIPTEXEC} ${ecmccfg_DIR}%s\n" % script_name
     return '${SCRIPTEXEC} ${ecmccfg_DIR}%s "%s"\n' % (script_name, payload)
 
 
@@ -2907,6 +2993,20 @@ def _extract_startup_objects_from_file(
                 )
             )
 
+        if module_script_name == "applyConfig.cmd":
+            env_values["ECMC_EC_APPLY_CFG_DONE"] = "1"
+            objects.append(
+                StartupObject(
+                    kind="apply_config",
+                    source=path,
+                    line=line_no,
+                    title="Apply Config",
+                    summary="Apply EtherCAT bus configuration",
+                    details=[],
+                    command_details=[],
+                )
+            )
+
         hw_desc = expanded_key_map.get("HW_DESC", env_values.get("HW_DESC", ""))
         if module_script_name in {"addSlave.cmd", "configureSlave.cmd"}:
             requested_slave_id = expanded_key_map.get("SLAVE_ID", env_values.get("SLAVE_ID", str(next_slave_id)))
@@ -2948,6 +3048,51 @@ def _extract_startup_objects_from_file(
                     title="Slave {} {}".format(assigned_slave_id, hw_desc).strip(),
                     summary=summary,
                     slave_id=assigned_slave_id,
+                    linked_file=config_target,
+                    details=detail_rows,
+                    command_details=command_rows,
+                )
+            )
+
+        if module_script_name == "applySlaveConfig.cmd":
+            parent_slave_id = _parse_int_value(
+                expanded_key_map.get("SLAVE_ID", env_values.get("ECMC_EC_SLAVE_NUM", ""))
+            )
+            if parent_slave_id is None:
+                parent_slave_id = last_slave_id
+            if hw_desc:
+                env_values["HW_DESC"] = hw_desc
+            config_target = None
+            local_config = expanded_key_map.get("LOCAL_CONFIG", "")
+            config_value = expanded_key_map.get("CONFIG", "")
+            if local_config:
+                config_target = _resolve_reference(local_config, base_dir)
+            elif config_value:
+                config_target = _resolve_reference(config_value, base_dir)
+                if config_target is None and hw_desc and "${" not in hw_desc and "$(" not in hw_desc:
+                    config_name = "ecmc{}{}.cmd".format(hw_desc, config_value)
+                    config_matches = inventory.hardware_configs.get(config_name, [])
+                    if config_matches:
+                        config_target = config_matches[0]
+            summary_target = local_config or config_value or "<unset>"
+            detail_rows = _format_tree_details(
+                expanded_key_map,
+                ["CONFIG", "LOCAL_CONFIG", "SLAVE_ID", "HW_DESC"],
+            )
+            command_rows = _format_command_macro_details(
+                module_script_name,
+                expanded_key_map,
+                inventory,
+                ["CONFIG", "LOCAL_CONFIG", "SLAVE_ID", "HW_DESC"],
+            )
+            objects.append(
+                StartupObject(
+                    kind="slave_config",
+                    source=path,
+                    line=line_no,
+                    title="Slave Config {}".format(Path(summary_target).name if local_config else summary_target).strip(),
+                    summary="CONFIG={}".format(summary_target),
+                    parent_slave_id=parent_slave_id,
                     linked_file=config_target,
                     details=detail_rows,
                     command_details=command_rows,
@@ -3011,6 +3156,36 @@ def _extract_startup_objects_from_file(
             )
             if schema_kind == "axis":
                 last_axis_line = line_no
+
+        if module_script_name == "configureAxis.cmd":
+            config_value = expanded_key_map.get("CONFIG", "")
+            config_target = _resolve_reference(config_value, base_dir) if config_value else None
+            detail_rows = _format_tree_details(
+                expanded_key_map,
+                ["CONFIG", "DEV", "CLEAR_VARS_CMD", "CFG_MACROS"],
+            )
+            command_rows = _format_command_macro_details(
+                module_script_name,
+                expanded_key_map,
+                inventory,
+                ["CONFIG", "DEV", "CLEAR_VARS_CMD", "CFG_MACROS"],
+            )
+            axis_name = Path(config_value).name if config_value else "axis"
+            summary = "CONFIG={}".format(config_value or "<unset>")
+            if expanded_key_map.get("DEV"):
+                summary = "DEV={}, {}".format(expanded_key_map["DEV"], summary)
+            objects.append(
+                StartupObject(
+                    kind="configured_axis",
+                    source=path,
+                    line=line_no,
+                    title="Configure Axis {}".format(axis_name),
+                    summary=summary,
+                    linked_file=config_target,
+                    details=detail_rows,
+                    command_details=command_rows,
+                )
+            )
 
         if module_script_name == "loadPLCFile.cmd":
             file_value = expanded_key_map.get("FILE", "")
@@ -3095,12 +3270,95 @@ def _extract_startup_objects_from_file(
                         + (rec_name or asyn_name or "variable"),
                         summary=summary,
                         parent_plc_id=plc_id,
-                        details=_format_tree_details(
+                    details=_format_tree_details(
                             expanded_db_macros,
                             ["P", "PORT", "ASYN_NAME", "REC_NAME", "TSE", "T_SMP_MS"],
                         ),
                     )
                 )
+
+        if module_script_name == "addMasterSlaveSM.cmd":
+            sm_id = _normalize_value(expanded_key_map.get("SM_ID", env_values.get("SM_ID", "0"))) or "0"
+            parsed_sm_id = _parse_int_value(sm_id)
+            if parsed_sm_id is not None:
+                env_values["ECMC_SM_ID"] = str(parsed_sm_id)
+                env_values["SM_ID"] = str(parsed_sm_id + 1)
+            detail_rows = _format_tree_details(
+                expanded_key_map,
+                ["NAME", "MST_GRP_NAME", "SLV_GRP_NAME", "MST_DISABLE", "SLV_DISABLE", "SM_ID"],
+            )
+            command_rows = _format_command_macro_details(
+                module_script_name,
+                expanded_key_map,
+                inventory,
+                ["NAME", "MST_GRP_NAME", "SLV_GRP_NAME", "MST_DISABLE", "SLV_DISABLE", "SM_ID"],
+            )
+            objects.append(
+                StartupObject(
+                    kind="master_slave_sm",
+                    source=path,
+                    line=line_no,
+                    title="Master/Slave SM {}".format(expanded_key_map.get("NAME", sm_id or "unnamed")),
+                    summary="NAME={}, MST_GRP_NAME={}, SLV_GRP_NAME={}".format(
+                        expanded_key_map.get("NAME", "<unset>"),
+                        expanded_key_map.get("MST_GRP_NAME", "<unset>"),
+                        expanded_key_map.get("SLV_GRP_NAME", "<unset>"),
+                    ),
+                    details=detail_rows,
+                    command_details=command_rows,
+                )
+            )
+
+        if module_script_name == "loadSubstConfig.cmd":
+            file_value = expanded_key_map.get("FILE", "")
+            subst_target = _resolve_reference(file_value, base_dir) if file_value else None
+            detail_rows = _format_tree_details(expanded_key_map, ["FILE", "MACROS"])
+            command_rows = _format_command_macro_details(
+                module_script_name,
+                expanded_key_map,
+                inventory,
+                ["FILE", "MACROS"],
+            )
+            objects.append(
+                StartupObject(
+                    kind="subst_config",
+                    source=path,
+                    line=line_no,
+                    title="Subst Config {}".format(Path(file_value).name if file_value else "file"),
+                    summary="FILE={}".format(file_value or "<unset>"),
+                    linked_file=subst_target,
+                    details=detail_rows,
+                    command_details=command_rows,
+                )
+            )
+
+        if module_script_name == "pvtControllerConfig.cmd":
+            detail_rows = _format_tree_details(
+                expanded_key_map,
+                ["TRG_EC_ENTRY", "TRG_DUR_S", "NAXES", "NPOINTS", "NREADBACK", "NPULSES", "MAX_SIZE", "SOFT_TRG_FLNK"],
+            )
+            command_rows = _format_command_macro_details(
+                module_script_name,
+                expanded_key_map,
+                inventory,
+                ["TRG_EC_ENTRY", "TRG_DUR_S", "NAXES", "NPOINTS", "NREADBACK", "NPULSES", "MAX_SIZE", "SOFT_TRG_FLNK"],
+            )
+            summary_parts: List[str] = []
+            if expanded_key_map.get("TRG_EC_ENTRY"):
+                summary_parts.append("TRG_EC_ENTRY={}".format(expanded_key_map["TRG_EC_ENTRY"]))
+            if expanded_key_map.get("NAXES"):
+                summary_parts.append("NAXES={}".format(expanded_key_map["NAXES"]))
+            objects.append(
+                StartupObject(
+                    kind="pvt_controller",
+                    source=path,
+                    line=line_no,
+                    title="PVT Controller",
+                    summary=", ".join(summary_parts) if summary_parts else "Profile move controller",
+                    details=detail_rows,
+                    command_details=command_rows,
+                )
+            )
 
         if module_script_name == "loadPlugin.cmd":
             file_value = expanded_key_map.get("FILE", "")
@@ -3122,6 +3380,34 @@ def _extract_startup_objects_from_file(
                     title="Plugin {}".format(plugin_id),
                     summary=summary,
                     linked_file=plugin_target,
+                    details=detail_rows,
+                    command_details=command_rows,
+                )
+            )
+
+        if module_script_name == "loadLUTFile.cmd":
+            file_value = expanded_key_map.get("FILE", "")
+            lut_target = _resolve_reference(file_value, base_dir) if file_value else None
+            lut_id = _normalize_value(expanded_key_map.get("LUT_ID", env_values.get("LUT_ID", "0"))) or "0"
+            parsed_lut_id = _parse_int_value(lut_id)
+            if parsed_lut_id is not None:
+                env_values["ECMC_LUT_ID"] = str(parsed_lut_id)
+                env_values["LUT_ID"] = str(parsed_lut_id + 1)
+            detail_rows = _format_tree_details(expanded_key_map, ["FILE", "LUT_ID"])
+            command_rows = _format_command_macro_details(
+                module_script_name,
+                expanded_key_map,
+                inventory,
+                ["FILE", "LUT_ID"],
+            )
+            objects.append(
+                StartupObject(
+                    kind="lut",
+                    source=path,
+                    line=line_no,
+                    title="LUT {}".format(lut_id),
+                    summary="LUT_ID={}, FILE={}".format(lut_id, file_value or "<unset>"),
+                    linked_file=lut_target,
                     details=detail_rows,
                     command_details=command_rows,
                 )
@@ -3435,6 +3721,100 @@ def _validate_axis_identity_uniqueness(
     return issues
 
 
+def _validate_extended_startup_object_relationships(
+    startup_tree: StartupTreeModel,
+    inventory: RepositoryInventory,
+    buffer_lookup: Optional[Dict[Path, str]] = None,
+) -> List[ValidationIssue]:
+    issues: List[ValidationIssue] = []
+    global_macros = _project_macro_map_from_tree(startup_tree)
+    axis_groups_by_source: Dict[Path, Set[str]] = {}
+    pvt_axis_count_by_source: Dict[Path, int] = {}
+
+    for file_node in startup_tree.files:
+        source_path = file_node.path.resolve()
+        axis_groups_by_source.setdefault(source_path, set())
+        pvt_axis_count_by_source.setdefault(source_path, 0)
+        for obj in file_node.objects:
+            if obj.kind != "axis" or obj.linked_file is None:
+                continue
+            yaml_text = _read_text_from_buffers(obj.linked_file, buffer_lookup)
+            if yaml_text is None:
+                continue
+            macro_scope = dict(global_macros)
+            for key, value in obj.command_details:
+                macro_scope[key] = value
+            for key, value in obj.linked_file_details:
+                macro_scope[key] = value
+            expanded_yaml = _expand_text_macros(yaml_text, macro_scope)
+            parsed_entries = _parse_simple_yaml_paths(expanded_yaml)
+            value_by_path = {entry.path: entry.value for entry in parsed_entries if entry.value is not None}
+            axis_group = _normalize_value(value_by_path.get("axis.group", "") or "")
+            if axis_group:
+                axis_groups_by_source[source_path].add(axis_group)
+            if any(
+                entry.path in {"axis.pvt", "epics.motorRecord.pvt"}
+                or entry.path.startswith("axis.pvt.")
+                or entry.path.startswith("epics.motorRecord.pvt.")
+                for entry in parsed_entries
+            ):
+                pvt_axis_count_by_source[source_path] += 1
+
+    for file_node in startup_tree.files:
+        source_path = file_node.path.resolve()
+        known_groups = axis_groups_by_source.get(source_path, set())
+        pvt_axis_count = pvt_axis_count_by_source.get(source_path, 0)
+        for obj in file_node.objects:
+            detail_map = dict(obj.details)
+            if obj.kind == "master_slave_sm":
+                master_group = detail_map.get("MST_GRP_NAME", "").strip()
+                slave_group = detail_map.get("SLV_GRP_NAME", "").strip()
+                if not known_groups:
+                    issues.append(
+                        ValidationIssue(
+                            severity="warning",
+                            source=obj.source,
+                            line=obj.line,
+                            message=(
+                                "Cannot verify master/slave groups for '{}' because no axis.group values were found "
+                                "in axis YAML files loaded from this startup file"
+                            ).format(obj.title),
+                        )
+                    )
+                    continue
+                if master_group and master_group not in known_groups:
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            source=obj.source,
+                            line=obj.line,
+                            message="MST_GRP_NAME '{}' was not found in any loaded axis.group value".format(master_group),
+                        )
+                    )
+                if slave_group and slave_group not in known_groups:
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            source=obj.source,
+                            line=obj.line,
+                            message="SLV_GRP_NAME '{}' was not found in any loaded axis.group value".format(slave_group),
+                        )
+                    )
+            elif obj.kind == "pvt_controller" and pvt_axis_count <= 0:
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        source=obj.source,
+                        line=obj.line,
+                        message=(
+                            "PVT controller is configured but no loaded axis YAML in this startup file declares PVT support"
+                        ),
+                    )
+                )
+
+    return issues
+
+
 def validate_project(
     startup_path: Path,
     startup_text: str,
@@ -3488,6 +3868,7 @@ def validate_project(
         buffer_lookup=buffer_lookup,
     )
     issues.extend(_validate_axis_identity_uniqueness(startup_tree, inventory, buffer_lookup))
+    issues.extend(_validate_extended_startup_object_relationships(startup_tree, inventory, buffer_lookup))
 
     return ValidationResult(issues=issues, references=references, visited_files=visited)
 
@@ -3510,10 +3891,23 @@ class ValidatorApp:
         self.editor_file_var = tk.StringVar(value="(no file selected)")
         self.editor_search_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready")
+        self.editor_auto_complete_var = tk.BooleanVar(value=True)
+        self.editor_macro_hover_var = tk.BooleanVar(value=True)
+        self.tree_view_mode_var = tk.StringVar(value="Flow")
+        self.tree_filter_var = tk.StringVar(value="All")
+        self.tree_sort_var = tk.StringVar(value="Flow")
+        self.tree_search_var = tk.StringVar(value="")
+        self.tree_compact_var = tk.BooleanVar(value=False)
+        self.tree_overview_var = tk.StringVar(value="No objects loaded")
+        self.tree_view_toggle_var = tk.StringVar(value="Show Objects")
+        self.tree_error_var = tk.StringVar(value="0 errors")
+        self.tree_warning_var = tk.StringVar(value="0 warnings")
+        self.tree_unsaved_var = tk.StringVar(value="0 unsaved")
+        self.tree_missing_var = tk.StringVar(value="0 missing")
         self.inventory_var = tk.StringVar(
             value=(
-                f"scripts/: {len(self.inventory.module_scripts)} commands, "
-                f"hardware/: {len(self.inventory.hardware_descs)} HW_DESC values"
+                f"{len(self.inventory.module_scripts)} scripts  •  "
+                f"{len(self.inventory.hardware_descs)} HW_DESC"
             )
         )
 
@@ -3526,7 +3920,32 @@ class ValidatorApp:
         self.validation_summary_var = tk.StringVar(value="No validation results yet.")
         self.issue_item_map: Dict[str, ValidationIssue] = {}
         self.param_notebook = None
+        self.selection_header_var = tk.StringVar(value="No object selected")
+        self.object_action_hint_var = tk.StringVar(value="Select an object to edit, open a linked file, or add a macro.")
+        self.help_summary_var = tk.StringVar(value="Select an object to see targeted problems and suggestions.")
         self.context_tree = None
+        self.context_open_button = None
+        self.context_edit_button = None
+        self.context_macro_button = None
+        self.help_issue_tree = None
+        self.help_issue_item_map: Dict[str, ValidationIssue] = {}
+        self.help_issue_action_map: Dict[str, Tuple[str, object]] = {}
+        self.help_suggestion_list = None
+        self.help_suggestion_actions: List[Optional[str]] = []
+        self.help_open_button = None
+        self.help_edit_button = None
+        self.help_macro_button = None
+        self.help_validate_button = None
+        self.quick_edit_key_var = tk.StringVar(value="")
+        self.quick_edit_value_var = tk.StringVar(value="")
+        self.quick_edit_hint_var = tk.StringVar(value="Select an object field to edit directly.")
+        self.quick_edit_key_combo = None
+        self.quick_edit_value_entry = None
+        self.quick_edit_apply_button = None
+        self.quick_edit_open_button = None
+        self.quick_edit_frame = None
+        self.quick_edit_fields: List[str] = []
+        self.resolved_text = None
         self.object_action_frame = None
         self.edit_object_button = None
         self.add_macro_button = None
@@ -3542,12 +3961,27 @@ class ValidatorApp:
         self.file_browser_loaded_dirs: Set[Path] = set()
         self.file_browser_root: Optional[Path] = None
         self.file_browser_root_item: Optional[str] = None
+        self.tree_error_button = None
+        self.tree_warning_button = None
+        self.tree_unsaved_button = None
+        self.tree_missing_button = None
+        self.tree_view_toggle_button = None
+        self.selection_kind_badge = None
+        self.selection_state_badge = None
+        self.selection_source_badge = None
+        self.help_state_badge = None
+        self.help_summary_label = None
         self.editor_scrollbar = None
+        self._editor_target_line_clear_job = None
         self._editor_update_job = None
         self._editor_tree_sync_job = None
         self._editor_mouse_interacting_until = 0.0
         self._search_update_job = None
+        self._tree_filter_update_job = None
         self.editor_search_entry = None
+        self.tree_search_entry = None
+        self._editor_search_placeholder_visible = False
+        self._tree_search_placeholder_visible = False
         self.object_tree_items: Dict[Tuple[Path, int, str, str], str] = {}
         self.linked_file_tree_items: Dict[Path, List[str]] = {}
         self.linked_file_item_by_object_key: Dict[Tuple[Path, int, str, str], str] = {}
@@ -3580,6 +4014,13 @@ class ValidatorApp:
 
         self._configure_ui_style()
         self._build_ui()
+        self.tree_view_mode_var.trace_add("write", self._schedule_tree_view_update)
+        self.tree_view_mode_var.trace_add("write", self._on_tree_view_mode_changed)
+        self.tree_filter_var.trace_add("write", self._schedule_tree_view_update)
+        self.tree_sort_var.trace_add("write", self._schedule_tree_view_update)
+        self.tree_search_var.trace_add("write", self._schedule_tree_view_update)
+        self.tree_compact_var.trace_add("write", self._schedule_tree_view_update)
+        self._update_tree_view_toggle_text()
         self.status_var.trace_add("write", self._on_status_message_changed)
         self._append_log_message(self.status_var.get())
 
@@ -3596,11 +4037,40 @@ class ValidatorApp:
 
         self.root.configure(background="#f3efe7")
         style.configure(".", font=("Helvetica", 12))
-        style.configure("Toolbar.TButton", padding=(10, 6))
-        style.configure("ObjectAction.TButton", font=("Helvetica", 10), padding=(2, 2))
+        style.configure("Toolbar.TButton", padding=(8, 6))
+        style.configure("ObjectAction.TButton", font=("Helvetica", 10), padding=(4, 2))
+        style.configure("TreeChip.TButton", font=("Helvetica", 10, "bold"), padding=(8, 2), relief="flat")
+        style.map("TreeChip.TButton", relief=[("pressed", "sunken")])
+        style.configure("ErrorChip.TButton", background="#f8d7da", foreground="#8b1e2d")
+        style.map(
+            "ErrorChip.TButton",
+            background=[("active", "#f3c2c8"), ("disabled", "#efe6e7")],
+            foreground=[("disabled", "#a78a8f")],
+        )
+        style.configure("WarningChip.TButton", background="#fff0c2", foreground="#8a5a00")
+        style.map(
+            "WarningChip.TButton",
+            background=[("active", "#fbe6a5"), ("disabled", "#f2ece0")],
+            foreground=[("disabled", "#a99672")],
+        )
+        style.configure("UnsavedChip.TButton", background="#dcecff", foreground="#0b5cad")
+        style.map(
+            "UnsavedChip.TButton",
+            background=[("active", "#c6e0ff"), ("disabled", "#e7edf4")],
+            foreground=[("disabled", "#8ba0b5")],
+        )
+        style.configure("MissingChip.TButton", background="#eadcf7", foreground="#6e3ea3")
+        style.map(
+            "MissingChip.TButton",
+            background=[("active", "#dec9f1"), ("disabled", "#efe8f4")],
+            foreground=[("disabled", "#a294b3")],
+        )
+        style.configure("ViewToggle.TButton", font=("Helvetica", 10, "bold"), padding=(8, 2))
         style.configure("Section.TLabel", font=("Helvetica", 13, "bold"))
         style.configure("Muted.TLabel", foreground="#5f6a77")
-        style.configure("Treeview", rowheight=24)
+        style.configure("HeaderNote.TLabel", foreground="#5f6a77", font=("Helvetica", 11))
+        style.configure("Treeview", rowheight=26)
+        style.configure("Treeview.Heading", font=("Helvetica", 11, "bold"))
         style.map(
             "Treeview",
             background=[("selected", "#cfe0f6")],
@@ -3623,11 +4093,11 @@ class ValidatorApp:
         ttk.Button(top, text="Open", style="Toolbar.TButton", command=self._load_startup_from_entry).grid(row=0, column=3, padx=(0, 6))
         ttk.Button(top, text="Save File", style="Toolbar.TButton", command=self._save_current_file).grid(row=0, column=4, padx=(0, 6))
         ttk.Button(top, text="Save All", style="Toolbar.TButton", command=self._save_all_files).grid(row=0, column=5, padx=(0, 6))
-        ttk.Button(top, text="Reload Objects", style="Toolbar.TButton", command=self._refresh_startup_tree).grid(row=0, column=6, padx=(0, 6))
+        ttk.Button(top, text="Refresh", style="Toolbar.TButton", command=self._refresh_startup_tree).grid(row=0, column=6, padx=(0, 6))
         ttk.Button(top, text="Validate", style="Toolbar.TButton", command=self._validate_current_project).grid(row=0, column=7)
-        self.log_toggle_button = ttk.Button(top, text="Show Results", style="Toolbar.TButton", command=self._show_latest_results)
+        self.log_toggle_button = ttk.Button(top, text="Results", style="Toolbar.TButton", command=self._show_latest_results)
         self.log_toggle_button.grid(row=0, column=8, padx=(6, 0))
-        ttk.Label(top, textvariable=self.inventory_var, style="Muted.TLabel").grid(row=1, column=1, sticky=tk.W, padx=6, pady=(6, 0))
+        ttk.Label(top, textvariable=self.inventory_var, style="HeaderNote.TLabel").grid(row=1, column=1, sticky=tk.W, padx=6, pady=(6, 0))
         top.columnconfigure(1, weight=1)
 
         center = ttk.Panedwindow(self.root, orient=tk.VERTICAL)
@@ -3647,22 +4117,130 @@ class ValidatorApp:
         left.add(object_frame, weight=3)
         left.add(lower_left, weight=2)
 
-        ttk.Label(object_frame, text="Objects", style="Section.TLabel").pack(anchor=tk.W)
-        ttk.Label(object_frame, text="Execution order flows top to bottom", style="Muted.TLabel").pack(
+        object_header = ttk.Frame(object_frame)
+        object_header.pack(fill=tk.X)
+        ttk.Label(object_header, text="Objects", style="Section.TLabel").pack(side=tk.LEFT, anchor=tk.W)
+        ttk.Label(object_header, textvariable=self.tree_overview_var, style="Muted.TLabel").pack(side=tk.RIGHT)
+        overview_action_frame = ttk.Frame(object_frame)
+        overview_action_frame.pack(fill=tk.X, pady=(2, 4))
+        ttk.Label(overview_action_frame, text="Status", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+        self.tree_error_button = ttk.Button(
+            overview_action_frame,
+            textvariable=self.tree_error_var,
+            style="ErrorChip.TButton",
+            command=self._show_error_tree_items,
+        )
+        self.tree_error_button.pack(side=tk.LEFT)
+        self.tree_warning_button = ttk.Button(
+            overview_action_frame,
+            textvariable=self.tree_warning_var,
+            style="WarningChip.TButton",
+            command=self._show_warning_tree_items,
+        )
+        self.tree_warning_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.tree_unsaved_button = ttk.Button(
+            overview_action_frame,
+            textvariable=self.tree_unsaved_var,
+            style="UnsavedChip.TButton",
+            command=self._show_unsaved_tree_items,
+        )
+        self.tree_unsaved_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.tree_missing_button = ttk.Button(
+            overview_action_frame,
+            textvariable=self.tree_missing_var,
+            style="MissingChip.TButton",
+            command=self._show_missing_tree_items,
+        )
+        self.tree_missing_button.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(
+            overview_action_frame,
+            text="Reset View",
+            style="ObjectAction.TButton",
+            command=self._reset_tree_view_controls,
+        ).pack(side=tk.RIGHT)
+        ttk.Button(
+            overview_action_frame,
+            text="Collapse All",
+            style="ObjectAction.TButton",
+            command=self._collapse_startup_tree,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(
+            overview_action_frame,
+            text="Expand Issues",
+            style="ObjectAction.TButton",
+            command=self._expand_issue_tree_nodes,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(
+            overview_action_frame,
+            text="Unsaved",
+            style="ObjectAction.TButton",
+            command=self._show_unsaved_tree_items,
+        ).pack(side=tk.RIGHT, padx=(12, 0))
+        ttk.Button(
+            overview_action_frame,
+            text="Issues",
+            style="ObjectAction.TButton",
+            command=self._show_issue_tree_items,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+        filter_frame = ttk.Frame(object_frame)
+        filter_frame.pack(fill=tk.X, pady=(4, 4))
+        ttk.Label(filter_frame, text="View", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+        tree_view_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.tree_view_mode_var,
+            values=("Flow", "Objects"),
+            state="readonly",
+            width=8,
+        )
+        tree_view_combo.pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(filter_frame, text="Show", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+        tree_filter_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.tree_filter_var,
+            values=("All", "Slaves", "Axes", "PLCs", "Macros", "ECMC", "Errors", "Warnings", "Missing", "Issues", "Unsaved"),
+            state="readonly",
+            width=10,
+        )
+        tree_filter_combo.pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(filter_frame, text="Sort", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+        tree_sort_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.tree_sort_var,
+            values=("Flow", "Name", "ID"),
+            state="readonly",
+            width=7,
+        )
+        tree_sort_combo.pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(filter_frame, text="Search", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+        tree_search_entry = tk.Entry(filter_frame, textvariable=self.tree_search_var, width=24, relief=tk.FLAT, highlightthickness=1)
+        tree_search_entry.pack(side=tk.LEFT)
+        tree_search_entry.configure(highlightbackground="#d0cabf", highlightcolor="#8fb7e1")
+        tree_search_entry.bind("<Return>", self._focus_first_tree_match)
+        tree_search_entry.bind("<FocusIn>", self._on_tree_search_focus_in)
+        tree_search_entry.bind("<FocusOut>", self._on_tree_search_focus_out)
+        self.tree_search_entry = tree_search_entry
+        self._set_tree_search_placeholder()
+        ttk.Button(filter_frame, text="Clear", style="ObjectAction.TButton", command=lambda: self.tree_search_var.set("")).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+        ttk.Checkbutton(filter_frame, text="Compact", variable=self.tree_compact_var).pack(side=tk.RIGHT)
+        ttk.Label(
+            object_frame,
+            text="Order: top to bottom • ▣ file • ↗ linked file • ≡ macros • badges: ● unsaved  ! error  ? warning  × missing",
+            style="Muted.TLabel",
+        ).pack(
             anchor=tk.W, pady=(0, 6)
         )
         self.startup_tree = ttk.Treeview(
             object_frame,
-            columns=("type", "summary"),
+            columns=("summary",),
             show="tree headings",
             selectmode="extended",
         )
         self.startup_tree.heading("#0", text="Object", anchor=tk.W)
-        self.startup_tree.heading("type", text="Type", anchor=tk.W)
         self.startup_tree.heading("summary", text="Summary", anchor=tk.W)
-        self.startup_tree.column("#0", width=230, stretch=True, anchor=tk.W)
-        self.startup_tree.column("type", width=90, stretch=False, anchor=tk.W)
-        self.startup_tree.column("summary", width=340, stretch=True, anchor=tk.W)
+        self.startup_tree.column("#0", width=330, stretch=True, anchor=tk.W)
+        self.startup_tree.column("summary", width=330, stretch=True, anchor=tk.W)
         self.startup_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         object_scroll = ttk.Scrollbar(object_frame, orient=tk.VERTICAL, command=self.startup_tree.yview)
         object_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -3740,26 +4318,124 @@ class ValidatorApp:
             style="ObjectAction.TButton",
         )
         self.delete_object_button.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(lower_left, textvariable=self.object_action_hint_var, style="Muted.TLabel").pack(fill=tk.X, pady=(0, 6))
 
         self.param_notebook = ttk.Notebook(lower_left)
         self.param_notebook.pack(fill=tk.BOTH, expand=True)
 
         param_frame = ttk.Frame(self.param_notebook)
         self.param_notebook.add(param_frame, text="Details")
-        self.param_tree = ttk.Treeview(param_frame, columns=("value",), show="tree headings")
+        ttk.Label(param_frame, textvariable=self.selection_header_var, style="Section.TLabel").pack(
+            side=tk.TOP, anchor=tk.W, pady=(0, 6)
+        )
+        selection_badge_frame = ttk.Frame(param_frame)
+        selection_badge_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
+        self.selection_kind_badge = tk.Label(
+            selection_badge_frame,
+            text="Selection",
+            padx=8,
+            pady=2,
+            background="#e8edf2",
+            foreground="#425466",
+        )
+        self.selection_kind_badge.pack(side=tk.LEFT)
+        self.selection_state_badge = tk.Label(
+            selection_badge_frame,
+            text="State",
+            padx=8,
+            pady=2,
+            background="#eef3e8",
+            foreground="#45603f",
+        )
+        self.selection_state_badge.pack(side=tk.LEFT, padx=(6, 0))
+        self.selection_source_badge = tk.Label(
+            selection_badge_frame,
+            text="Source",
+            padx=8,
+            pady=2,
+            background="#f2ede5",
+            foreground="#6a5b4d",
+        )
+        self.selection_source_badge.pack(side=tk.LEFT, padx=(6, 0))
+        param_tree_frame = ttk.Frame(param_frame)
+        param_tree_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.param_tree = ttk.Treeview(param_tree_frame, columns=("value",), show="tree headings")
         self.param_tree.heading("#0", text="Parameter", anchor=tk.W)
         self.param_tree.heading("value", text="Value", anchor=tk.W)
         self.param_tree.column("#0", width=190, stretch=False, anchor=tk.W)
         self.param_tree.column("value", width=360, stretch=True, anchor=tk.W)
         self.param_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        param_scroll = ttk.Scrollbar(param_frame, orient=tk.VERTICAL, command=self.param_tree.yview)
+        param_scroll = ttk.Scrollbar(param_tree_frame, orient=tk.VERTICAL, command=self.param_tree.yview)
         param_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.param_tree.configure(yscrollcommand=param_scroll.set)
+        self.param_tree.tag_configure("param-primary", foreground="#21384f", font=("Helvetica", 11, "bold"))
+        self.param_tree.tag_configure("param-meta", foreground="#6a7280")
         self.param_tree.bind("<Double-1>", self._edit_selected_parameter)
         self.param_tree.bind("<Return>", self._edit_selected_parameter)
+        self.param_tree.bind("<<TreeviewSelect>>", self._on_param_tree_selected)
+
+        quick_edit_frame = ttk.Frame(param_frame, padding=(0, 0, 0, 0))
+        self.quick_edit_frame = quick_edit_frame
+        ttk.Label(quick_edit_frame, text="Quick Edit", style="Muted.TLabel").grid(row=0, column=0, sticky=tk.W, padx=(0, 6))
+        self.quick_edit_key_combo = ttk.Combobox(
+            quick_edit_frame,
+            textvariable=self.quick_edit_key_var,
+            state="readonly",
+            width=18,
+        )
+        self.quick_edit_key_combo.grid(row=0, column=1, sticky=tk.EW, padx=(0, 8))
+        self.quick_edit_key_combo.bind("<<ComboboxSelected>>", self._on_quick_edit_field_changed)
+        ttk.Label(quick_edit_frame, text="Value").grid(row=0, column=2, sticky=tk.W, padx=(0, 6))
+        self.quick_edit_value_entry = ttk.Entry(quick_edit_frame, textvariable=self.quick_edit_value_var, width=24)
+        self.quick_edit_value_entry.grid(row=0, column=3, sticky=tk.EW)
+        self.quick_edit_value_entry.bind("<Return>", self._apply_quick_edit)
+        self.quick_edit_open_button = ttk.Button(
+            quick_edit_frame,
+            text="Full Edit",
+            command=self._edit_selected_object,
+            style="ObjectAction.TButton",
+        )
+        self.quick_edit_open_button.grid(row=0, column=4, sticky=tk.W, padx=(8, 0))
+        self.quick_edit_apply_button = ttk.Button(
+            quick_edit_frame,
+            text="Apply",
+            command=self._apply_quick_edit,
+            style="ObjectAction.TButton",
+        )
+        self.quick_edit_apply_button.grid(row=0, column=5, sticky=tk.E, padx=(8, 0))
+        ttk.Label(quick_edit_frame, textvariable=self.quick_edit_hint_var, style="Muted.TLabel").grid(
+            row=1, column=0, columnspan=6, sticky=tk.W, pady=(4, 0)
+        )
+        quick_edit_frame.columnconfigure(1, weight=1)
+        quick_edit_frame.columnconfigure(3, weight=2)
+        quick_edit_frame.pack_forget()
 
         context_frame = ttk.Frame(self.param_notebook)
         self.param_notebook.add(context_frame, text="Context")
+        context_header = ttk.Frame(context_frame)
+        context_header.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(context_header, text="Current Context", style="Section.TLabel").pack(side=tk.LEFT)
+        self.context_open_button = ttk.Button(
+            context_header,
+            text="Open",
+            command=self._open_selected_object_file,
+            style="ObjectAction.TButton",
+        )
+        self.context_open_button.pack(side=tk.RIGHT)
+        self.context_macro_button = ttk.Button(
+            context_header,
+            text="Macro",
+            command=self._add_inline_macro,
+            style="ObjectAction.TButton",
+        )
+        self.context_macro_button.pack(side=tk.RIGHT, padx=(6, 0))
+        self.context_edit_button = ttk.Button(
+            context_header,
+            text="Edit",
+            command=self._edit_selected_object,
+            style="ObjectAction.TButton",
+        )
+        self.context_edit_button.pack(side=tk.RIGHT, padx=(6, 0))
         self.context_tree = ttk.Treeview(context_frame, columns=("value",), show="tree headings")
         self.context_tree.heading("#0", text="Context", anchor=tk.W)
         self.context_tree.heading("value", text="Value", anchor=tk.W)
@@ -3769,6 +4445,113 @@ class ValidatorApp:
         context_scroll = ttk.Scrollbar(context_frame, orient=tk.VERTICAL, command=self.context_tree.yview)
         context_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.context_tree.configure(yscrollcommand=context_scroll.set)
+        self.context_tree.tag_configure("context-primary", foreground="#21384f", font=("Helvetica", 11, "bold"))
+        self.context_tree.tag_configure("context-meta", foreground="#6a7280")
+        self.context_tree.tag_configure("context-support", foreground="#35586d")
+
+        resolved_frame = ttk.Frame(self.param_notebook)
+        self.param_notebook.add(resolved_frame, text="Resolved")
+        self.resolved_text = tk.Text(
+            resolved_frame,
+            wrap=tk.NONE,
+            state=tk.DISABLED,
+            relief=tk.FLAT,
+            background="#faf7f0",
+            foreground="#313131",
+        )
+        self.resolved_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        resolved_scroll = ttk.Scrollbar(resolved_frame, orient=tk.VERTICAL, command=self.resolved_text.yview)
+        resolved_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.resolved_text.configure(yscrollcommand=resolved_scroll.set)
+
+        help_frame = ttk.Frame(self.param_notebook)
+        self.param_notebook.add(help_frame, text="Help")
+        help_header = ttk.Frame(help_frame)
+        help_header.pack(fill=tk.X, pady=(0, 6))
+        self.help_validate_button = ttk.Button(
+            help_header,
+            text="Validate",
+            style="ObjectAction.TButton",
+            command=self._validate_current_project,
+        )
+        self.help_validate_button.pack(side=tk.RIGHT)
+        self.help_open_button = ttk.Button(
+            help_header,
+            text="Open",
+            style="ObjectAction.TButton",
+            command=self._open_selected_object_file,
+        )
+        self.help_open_button.pack(side=tk.RIGHT, padx=(6, 0))
+        self.help_macro_button = ttk.Button(
+            help_header,
+            text="Macro",
+            style="ObjectAction.TButton",
+            command=self._add_inline_macro,
+        )
+        self.help_macro_button.pack(side=tk.RIGHT, padx=(6, 0))
+        self.help_edit_button = ttk.Button(
+            help_header,
+            text="Edit",
+            style="ObjectAction.TButton",
+            command=self._edit_selected_object,
+        )
+        self.help_edit_button.pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Label(help_header, text="Problems & Suggestions", style="Section.TLabel").pack(side=tk.LEFT)
+        self.help_state_badge = tk.Label(
+            help_header,
+            text="Info",
+            padx=8,
+            pady=2,
+            background="#e8edf2",
+            foreground="#425466",
+        )
+        self.help_state_badge.pack(side=tk.LEFT, padx=(10, 0))
+        self.help_summary_label = ttk.Label(help_header, textvariable=self.help_summary_var, style="Muted.TLabel")
+        self.help_summary_label.pack(side=tk.LEFT, padx=(8, 0))
+
+        help_body = ttk.Panedwindow(help_frame, orient=tk.VERTICAL)
+        help_body.pack(fill=tk.BOTH, expand=True)
+
+        help_issues_frame = ttk.Frame(help_body)
+        self.help_issue_tree = ttk.Treeview(
+            help_issues_frame,
+            columns=("severity", "message", "action"),
+            show="headings",
+            height=5,
+        )
+        self.help_issue_tree.heading("severity", text="Level", anchor=tk.W)
+        self.help_issue_tree.heading("message", text="Problem", anchor=tk.W)
+        self.help_issue_tree.heading("action", text="Action", anchor=tk.W)
+        self.help_issue_tree.column("severity", width=75, stretch=False, anchor=tk.W)
+        self.help_issue_tree.column("message", width=320, stretch=True, anchor=tk.W)
+        self.help_issue_tree.column("action", width=100, stretch=False, anchor=tk.W)
+        self.help_issue_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.help_issue_tree.bind("<Double-1>", self._open_selected_help_issue)
+        self.help_issue_tree.bind("<Return>", self._open_selected_help_issue)
+        help_issue_scroll = ttk.Scrollbar(help_issues_frame, orient=tk.VERTICAL, command=self.help_issue_tree.yview)
+        help_issue_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.help_issue_tree.configure(yscrollcommand=help_issue_scroll.set)
+
+        help_suggestions_frame = ttk.Frame(help_body)
+        self.help_suggestion_list = tk.Listbox(
+            help_suggestions_frame,
+            exportselection=False,
+            activestyle="none",
+            height=6,
+        )
+        self.help_suggestion_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.help_suggestion_list.bind("<Double-1>", self._run_selected_help_suggestion)
+        self.help_suggestion_list.bind("<Return>", self._run_selected_help_suggestion)
+        help_suggestion_scroll = ttk.Scrollbar(
+            help_suggestions_frame,
+            orient=tk.VERTICAL,
+            command=self.help_suggestion_list.yview,
+        )
+        help_suggestion_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.help_suggestion_list.configure(yscrollcommand=help_suggestion_scroll.set)
+
+        help_body.add(help_issues_frame, weight=3)
+        help_body.add(help_suggestions_frame, weight=2)
 
         file_browser_frame = ttk.Frame(self.param_notebook)
         self.param_notebook.add(file_browser_frame, text="Files")
@@ -3785,23 +4568,43 @@ class ValidatorApp:
         self.file_browser_tree.bind("<Double-1>", self._on_file_browser_selected)
         self.file_browser_tree.bind("<<TreeviewOpen>>", self._on_file_browser_open)
 
-        ttk.Label(right, text="Source", style="Section.TLabel").pack(anchor=tk.W)
+        ttk.Label(right, text="Editor", style="Section.TLabel").pack(anchor=tk.W)
         editor_header = ttk.Frame(right)
         editor_header.pack(fill=tk.X, pady=(4, 4))
         ttk.Label(editor_header, textvariable=self.editor_file_var).pack(side=tk.LEFT)
         search_frame = ttk.Frame(editor_header)
         search_frame.pack(side=tk.RIGHT)
-        ttk.Button(editor_header, text="Reload From Disk", command=self._reload_current_from_disk).pack(side=tk.RIGHT)
+        ttk.Button(editor_header, text="Revert", command=self._reload_current_from_disk).pack(side=tk.RIGHT)
+        ttk.Checkbutton(
+            editor_header,
+            text="Macro Hover",
+            variable=self.editor_macro_hover_var,
+            command=self._on_editor_assist_setting_changed,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Checkbutton(
+            editor_header,
+            text="EC Help",
+            variable=self.editor_auto_complete_var,
+            command=self._on_editor_assist_setting_changed,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Label(search_frame, text="Find", style="Muted.TLabel").pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Button(search_frame, text="Next", command=lambda: self._goto_search_match(forward=True)).pack(side=tk.RIGHT)
         ttk.Button(search_frame, text="Prev", command=lambda: self._goto_search_match(forward=False)).pack(
             side=tk.RIGHT, padx=(0, 4)
         )
-        search_entry = ttk.Entry(search_frame, textvariable=self.editor_search_var, width=24)
+        search_entry = tk.Entry(search_frame, textvariable=self.editor_search_var, width=26, relief=tk.FLAT, highlightthickness=1)
         search_entry.pack(side=tk.RIGHT, padx=(0, 6))
         search_entry.bind("<KeyRelease>", self._on_search_changed)
         search_entry.bind("<Return>", lambda _event: self._goto_search_match(forward=True))
+        search_entry.bind("<FocusIn>", self._on_editor_search_focus_in)
+        search_entry.bind("<FocusOut>", self._on_editor_search_focus_out)
         self.editor_search_entry = search_entry
+        self._set_editor_search_placeholder()
         self.root.bind_all("<Control-f>", self._focus_editor_search, add="+")
+        self.root.bind_all("<Control-Shift-S>", self._on_ctrl_shift_s, add="+")
+        self.root.bind_all("<Command-Shift-S>", self._on_ctrl_shift_s, add="+")
+        self.startup_tree.bind("<Delete>", self._on_tree_delete, add="+")
+        self.startup_tree.bind("<BackSpace>", self._on_tree_delete, add="+")
 
         editor_body = ttk.Frame(right)
         editor_body.pack(fill=tk.BOTH, expand=True)
@@ -3826,6 +4629,7 @@ class ValidatorApp:
         x_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.editor_text.configure(yscrollcommand=self._on_editor_yview, xscrollcommand=x_scroll.set)
         self.editor_text.tag_configure("current_line", background="#fff3bf")
+        self.editor_text.tag_configure("tree_target_line", background="#9fd0ff", foreground="#10243a")
         self.editor_text.tag_configure("match_bracket", background="#d7ecff", foreground="#003b73")
         self.editor_text.tag_configure("search_match", background="#fff1a8")
         self.editor_text.tag_configure("search_current", background="#ffd166")
@@ -3835,6 +4639,7 @@ class ValidatorApp:
         self.editor_text.tag_configure("syntax_keyword", foreground="#b45309")
         self.editor_text.tag_configure("syntax_number", foreground="#1d4ed8")
         self.editor_text.tag_configure("syntax_key", foreground="#047857")
+        self.editor_gutter.tag_configure("tree_target_line", background="#c7e1ff", foreground="#17324d")
         self.editor_text.bind("<<Modified>>", self._on_editor_modified)
         self.editor_text.bind("<KeyRelease>", self._on_editor_cursor_changed, add="+")
         self.editor_text.bind("<Motion>", self._on_editor_mouse_motion, add="+")
@@ -3857,6 +4662,7 @@ class ValidatorApp:
         self.editor_text.bind("<Return>", self._on_editor_completion_accept, add="+")
         self.editor_text.bind("<Escape>", self._on_editor_completion_escape, add="+")
         self.root.bind_all("<Control-s>", self._on_ctrl_s, add="+")
+        self.root.bind_all("<Command-s>", self._on_ctrl_s, add="+")
 
         self.log_frame = ttk.Frame(center)
         log_header = ttk.Frame(self.log_frame, padding=(8, 6))
@@ -3922,17 +4728,25 @@ class ValidatorApp:
 
     def _configure_startup_tree_tags(self) -> None:
         tag_styles = {
-            "node-file": {"foreground": "#5b6475"},
+            "node-file": {"foreground": "#445063", "font": ("Helvetica", 12, "bold")},
+            "node-category": {"foreground": "#506070", "font": ("Helvetica", 11, "bold")},
             "node-link": {"foreground": "#0b5cad"},
             "node-detail": {"foreground": "#485266"},
             "editor-current": {"background": "#d8e9ff"},
-            "group-command": {"foreground": "#7a3e00"},
-            "group-linked": {"foreground": "#005f73"},
+            "group-command": {"foreground": "#7a3e00", "font": ("Helvetica", 11, "bold")},
+            "group-linked": {"foreground": "#005f73", "font": ("Helvetica", 11, "bold")},
+            "status-dirty": {"background": "#eef5ff"},
+            "status-warning": {"background": "#fff4d8"},
+            "status-error": {"background": "#fde8e8"},
+            "status-missing": {"background": "#fde8e8"},
             "kind-macro": {"foreground": "#7c3a8c"},
             "kind-require": {"foreground": "#8b5e00"},
             "kind-master": {"foreground": "#8a5300"},
             "kind-slave": {"foreground": "#9c4221"},
+            "kind-slave_config": {"foreground": "#c77700"},
+            "kind-apply_config": {"foreground": "#6d4c41"},
             "kind-axis": {"foreground": "#0b5cad"},
+            "kind-configured_axis": {"foreground": "#1c78c0"},
             "kind-encoder": {"foreground": "#00796b"},
             "kind-plc": {"foreground": "#2e7d32"},
             "kind-plugin": {"foreground": "#6a1b9a"},
@@ -3940,6 +4754,10 @@ class ValidatorApp:
             "kind-component": {"foreground": "#ad1457"},
             "kind-ecsdo": {"foreground": "#c62828"},
             "kind-ecdataitem": {"foreground": "#00838f"},
+            "kind-master_slave_sm": {"foreground": "#7b1fa2"},
+            "kind-subst_config": {"foreground": "#5d4037"},
+            "kind-pvt_controller": {"foreground": "#00695c"},
+            "kind-lut": {"foreground": "#2e7d32"},
             "kind-plcvar_analog": {"foreground": "#558b2f"},
             "kind-plcvar_binary": {"foreground": "#33691e"},
             "kind-ecmc_command": {"foreground": "#5c6bc0"},
@@ -3952,13 +4770,543 @@ class ValidatorApp:
     def _tree_tags_for_object(self, obj: StartupObject) -> Tuple[str, ...]:
         return ("node-object", "kind-{}".format(obj.kind))
 
+    def _tree_object_symbol(self, kind: str) -> str:
+        return {
+            "require": "⇢",
+            "master": "◇",
+            "macro": "※",
+            "slave": "◉",
+            "slave_config": "◔",
+            "apply_config": "⇣",
+            "axis": "◎",
+            "configured_axis": "◍",
+            "encoder": "◌",
+            "plc": "▤",
+            "plugin": "◈",
+            "datastorage": "▥",
+            "component": "◆",
+            "ecsdo": "◍",
+            "ecdataitem": "◐",
+            "master_slave_sm": "⇄",
+            "subst_config": "▦",
+            "pvt_controller": "◳",
+            "lut": "▧",
+            "plcvar_analog": "∿",
+            "plcvar_binary": "⊙",
+            "ecmc_command": "≣",
+            "record_update_rate": "◷",
+            "restore_record_update_rate": "◴",
+        }.get(kind, "•")
+
+    def _prefixed_tree_text(self, prefix: str, text: str) -> str:
+        return "{} {}".format(prefix, text)
+
+    def _tree_text_logical_name(self, text: str) -> str:
+        for prefix in ("· ", "↗ ", "≡ ", "▣ "):
+            if text.startswith(prefix):
+                return text[len(prefix) :]
+        return text
+
+    def _schedule_tree_view_update(self, *_args) -> None:
+        if self._tree_filter_update_job is not None:
+            try:
+                self.root.after_cancel(self._tree_filter_update_job)
+            except Exception:
+                pass
+        self._tree_filter_update_job = self.root.after(80, self._apply_tree_view_update)
+
+    def _apply_tree_view_update(self) -> None:
+        self._tree_filter_update_job = None
+        if self.startup_tree is None or self.latest_startup_tree is None:
+            return
+        startup_value = self.startup_var.get().strip()
+        if not startup_value:
+            return
+        startup_path = Path(startup_value).expanduser().resolve()
+        tree_state = self._capture_startup_tree_state()
+        self._populate_startup_tree(startup_path, self.latest_startup_tree, tree_state=tree_state)
+
+    def _on_tree_view_mode_changed(self, *_args) -> None:
+        self._update_tree_view_toggle_text()
+
+    def _tree_filter_kind(self) -> str:
+        return self.tree_filter_var.get().strip().lower() or "all"
+
+    def _update_tree_view_toggle_text(self) -> None:
+        mode = self.tree_view_mode_var.get().strip().lower()
+        self.tree_view_toggle_var.set("Show Objects" if mode == "flow" else "Show Flow")
+
+    def _toggle_tree_view_mode(self) -> None:
+        current = self.tree_view_mode_var.get().strip().lower()
+        self.tree_view_mode_var.set("Objects" if current == "flow" else "Flow")
+
+    def _tree_view_mode(self) -> str:
+        return self.tree_view_mode_var.get().strip().lower() or "flow"
+
+    def _tree_sort_mode(self) -> str:
+        return self.tree_sort_var.get().strip().lower() or "flow"
+
+    def _tree_search_query(self) -> str:
+        if self._tree_search_placeholder_visible:
+            return ""
+        return self.tree_search_var.get().strip().lower()
+
+    def _set_tree_search_placeholder(self) -> None:
+        if self.tree_search_entry is None:
+            return
+        if self.tree_search_var.get().strip():
+            return
+        self._tree_search_placeholder_visible = True
+        self.tree_search_var.set("Filter objects")
+        self.tree_search_entry.configure(fg="#7a7a7a", highlightbackground="#d0cabf", highlightcolor="#c1b7a6")
+
+    def _clear_tree_search_placeholder(self) -> None:
+        if self.tree_search_entry is None or not self._tree_search_placeholder_visible:
+            return
+        self._tree_search_placeholder_visible = False
+        self.tree_search_var.set("")
+        self.tree_search_entry.configure(fg="#222222", highlightbackground="#d0cabf", highlightcolor="#8fb7e1")
+
+    def _on_tree_search_focus_in(self, _event=None) -> None:
+        self._clear_tree_search_placeholder()
+
+    def _on_tree_search_focus_out(self, _event=None) -> None:
+        if not self.tree_search_var.get().strip():
+            self._set_tree_search_placeholder()
+
+    def _tree_category_for_object(self, obj: StartupObject) -> str:
+        if obj.kind in {"slave", "slave_config", "component", "ecsdo", "ecdataitem"}:
+            return "Slaves"
+        if obj.kind in {"axis", "configured_axis", "encoder", "master_slave_sm", "pvt_controller", "lut"}:
+            return "Axes"
+        if obj.kind in {"plc", "plcvar_analog", "plcvar_binary", "plugin", "datastorage"}:
+            return "PLCs"
+        if obj.kind in {"macro", "require", "record_update_rate", "restore_record_update_rate"}:
+            return "Macros"
+        if obj.kind == "ecmc_command":
+            return "ECMC"
+        return "Other"
+
+    def _tree_filter_kind_match(self, obj: StartupObject, filter_kind: str) -> bool:
+        if filter_kind == "all":
+            return True
+        if filter_kind == "slaves":
+            return obj.kind in {"slave", "slave_config", "component", "ecsdo", "ecdataitem"}
+        if filter_kind == "axes":
+            return obj.kind in {"axis", "configured_axis", "encoder", "master_slave_sm", "pvt_controller", "lut"}
+        if filter_kind == "plcs":
+            return obj.kind in {"plc", "plcvar_analog", "plcvar_binary", "plugin", "datastorage"}
+        if filter_kind == "macros":
+            return obj.kind in {"macro", "require", "record_update_rate", "restore_record_update_rate"}
+        if filter_kind == "ecmc":
+            return obj.kind == "ecmc_command"
+        return True
+
+    def _tree_search_text_for_object(self, obj: StartupObject) -> str:
+        parts = [obj.kind, obj.title, obj.summary, self._tree_summary_for_object(obj)]
+        if obj.linked_file is not None:
+            parts.append(self._relative_display(obj.linked_file))
+        for key, value in obj.details:
+            parts.append(str(key))
+            parts.append(str(value))
+        for key, value in obj.command_details:
+            parts.append(str(key))
+            parts.append(str(value))
+        for key, value in obj.linked_file_details:
+            parts.append(str(key))
+            parts.append(str(value))
+        return " ".join(part for part in parts if part).lower()
+
+    def _object_matches_tree_view(
+        self,
+        obj: StartupObject,
+        filter_kind: str,
+        search_query: str,
+        object_severity: str,
+        source_dirty: bool,
+        linked_dirty: bool,
+        linked_missing: bool,
+    ) -> bool:
+        if filter_kind == "errors":
+            if object_severity != "error":
+                return False
+        elif filter_kind == "warnings":
+            if object_severity != "warning":
+                return False
+        elif filter_kind == "missing":
+            if not linked_missing:
+                return False
+        elif filter_kind == "issues":
+            if not (object_severity or linked_missing):
+                return False
+        elif filter_kind == "unsaved":
+            if not (source_dirty or linked_dirty):
+                return False
+        elif not self._tree_filter_kind_match(obj, filter_kind):
+            return False
+        if not search_query:
+            return True
+        return search_query in self._tree_search_text_for_object(obj)
+
+    def _tree_sort_value_for_object(self, obj: StartupObject, sort_mode: str) -> Tuple[object, ...]:
+        if sort_mode == "name":
+            return (obj.title.lower(), obj.line)
+        if sort_mode == "id":
+            detail_map = self._object_detail_map(obj)
+            for key in (
+                "SLAVE_ID",
+                "AXIS_ID",
+                "PLC_ID",
+                "ENC_SID",
+                "COMP_S_ID",
+                "PLUGIN_ID",
+                "DS_ID",
+                "LUT_ID",
+            ):
+                parsed = _parse_int_value(str(detail_map.get(key, "")))
+                if parsed is not None:
+                    return (0, parsed, obj.title.lower(), obj.line)
+            return (1, obj.title.lower(), obj.line)
+        return (obj.line,)
+
+    def _tree_category_summary_text(self, count: int, errors: int, warnings: int, dirty: int, missing: int) -> str:
+        parts = ["{} object(s)".format(count)]
+        if errors:
+            parts.append("{} err".format(errors))
+        if warnings:
+            parts.append("{} warn".format(warnings))
+        if dirty:
+            parts.append("{} dirty".format(dirty))
+        if missing:
+            parts.append("{} missing".format(missing))
+        return " • ".join(parts)
+
+    def _focus_first_tree_match(self, _event=None) -> str:
+        if self.startup_tree is None:
+            return "break"
+
+        def iter_items(parent: str = ""):
+            for item_id in self.startup_tree.get_children(parent):
+                yield item_id
+                yield from iter_items(item_id)
+
+        for item_id in iter_items(""):
+            entry = self.startup_item_map.get(item_id)
+            if entry is None:
+                continue
+            if entry[0] not in {"object", "linked-file", "detail", "linked-detail"}:
+                continue
+            self.startup_tree.selection_set(item_id)
+            self.startup_tree.focus(item_id)
+            self.startup_tree.see(item_id)
+            self._on_startup_tree_selected()
+            break
+        return "break"
+
+    def _iter_startup_tree_items(self, parent: str = ""):
+        if self.startup_tree is None:
+            return
+        for item_id in self.startup_tree.get_children(parent):
+            yield item_id
+            yield from self._iter_startup_tree_items(item_id)
+
+    def _reset_tree_view_controls(self) -> None:
+        self.tree_view_mode_var.set("Flow")
+        self.tree_filter_var.set("All")
+        self.tree_sort_var.set("Flow")
+        self.tree_search_var.set("")
+        self.tree_compact_var.set(False)
+
+    def _show_issue_tree_items(self) -> None:
+        self.tree_view_mode_var.set("Objects")
+        self.tree_filter_var.set("Issues")
+        self.tree_search_var.set("")
+        self.tree_compact_var.set(True)
+
+    def _show_error_tree_items(self) -> None:
+        self.tree_view_mode_var.set("Objects")
+        self.tree_filter_var.set("Errors")
+        self.tree_search_var.set("")
+        self.tree_compact_var.set(True)
+
+    def _show_warning_tree_items(self) -> None:
+        self.tree_view_mode_var.set("Objects")
+        self.tree_filter_var.set("Warnings")
+        self.tree_search_var.set("")
+        self.tree_compact_var.set(True)
+
+    def _show_unsaved_tree_items(self) -> None:
+        self.tree_view_mode_var.set("Objects")
+        self.tree_filter_var.set("Unsaved")
+        self.tree_search_var.set("")
+        self.tree_compact_var.set(True)
+
+    def _show_missing_tree_items(self) -> None:
+        self.tree_view_mode_var.set("Objects")
+        self.tree_filter_var.set("Missing")
+        self.tree_search_var.set("")
+        self.tree_compact_var.set(True)
+
+    def _collapse_startup_tree(self) -> None:
+        if self.startup_tree is None:
+            return
+        for item_id in self._iter_startup_tree_items(""):
+            self.startup_tree.item(item_id, open=False)
+
+    def _expand_issue_tree_nodes(self) -> None:
+        if self.startup_tree is None:
+            return
+        issue_tags = {"status-error", "status-warning", "status-missing"}
+        for item_id in self._iter_startup_tree_items(""):
+            tags = set(self.startup_tree.item(item_id, "tags") or ())
+            if tags & issue_tags:
+                current = item_id
+                while current:
+                    self.startup_tree.item(current, open=True)
+                    current = self.startup_tree.parent(current)
+
+    def _tree_summary_for_object(self, obj: StartupObject) -> str:
+        detail_map = self._object_detail_map(obj)
+        summary_pairs: List[Tuple[str, str]] = []
+
+        def add_pair(key: str, value: Optional[str]) -> None:
+            cleaned = str(value or "").strip()
+            if cleaned:
+                summary_pairs.append((key, cleaned))
+
+        if obj.kind == "require":
+            add_pair("module", detail_map.get("MODULE"))
+            add_pair("version", detail_map.get("VERSION"))
+        elif obj.kind == "macro":
+            add_pair("value", detail_map.get("VALUE"))
+        elif obj.kind == "slave":
+            add_pair("id", detail_map.get("SLAVE_ID"))
+            add_pair("hw", detail_map.get("HW_DESC"))
+        elif obj.kind == "slave_config":
+            add_pair("config", detail_map.get("CONFIG") or detail_map.get("LOCAL_CONFIG"))
+            add_pair("slave", detail_map.get("SLAVE_ID"))
+        elif obj.kind == "axis":
+            add_pair("name", detail_map.get("AX_NAME"))
+            add_pair("id", detail_map.get("AXIS_ID"))
+            add_pair("file", detail_map.get("FILE"))
+        elif obj.kind == "configured_axis":
+            add_pair("config", detail_map.get("CONFIG"))
+            add_pair("dev", detail_map.get("DEV"))
+        elif obj.kind == "encoder":
+            add_pair("file", detail_map.get("FILE"))
+            add_pair("enc", detail_map.get("ENC_SID"))
+        elif obj.kind == "plc":
+            add_pair("plc", detail_map.get("PLC_ID"))
+            add_pair("file", detail_map.get("FILE"))
+        elif obj.kind == "master_slave_sm":
+            add_pair("name", detail_map.get("NAME"))
+            add_pair("master", detail_map.get("MST_GRP_NAME"))
+            add_pair("slave", detail_map.get("SLV_GRP_NAME"))
+        elif obj.kind == "subst_config":
+            add_pair("file", detail_map.get("FILE"))
+        elif obj.kind == "apply_config":
+            add_pair("state", "bus apply")
+        elif obj.kind == "pvt_controller":
+            add_pair("trg", detail_map.get("TRG_EC_ENTRY"))
+            add_pair("axes", detail_map.get("NAXES"))
+        elif obj.kind == "lut":
+            add_pair("lut", detail_map.get("LUT_ID"))
+            add_pair("file", detail_map.get("FILE"))
+        elif obj.kind == "component":
+            add_pair("comp", detail_map.get("COMP"))
+            add_pair("slave", detail_map.get("COMP_S_ID"))
+            add_pair("ch", detail_map.get("CH_ID"))
+        elif obj.kind == "plugin":
+            add_pair("plugin", detail_map.get("PLUGIN_ID"))
+            add_pair("file", detail_map.get("FILE"))
+        elif obj.kind == "datastorage":
+            add_pair("ds", detail_map.get("DS_ID"))
+            add_pair("size", detail_map.get("DS_SIZE"))
+        elif obj.kind == "ecsdo":
+            add_pair("slave", detail_map.get("SLAVE_ID"))
+            add_pair("idx", detail_map.get("INDEX"))
+            add_pair("sub", detail_map.get("SUBINDEX"))
+        elif obj.kind == "ecdataitem":
+            add_pair("slave", detail_map.get("STRT_ENTRY_S_ID"))
+            add_pair("entry", detail_map.get("STRT_ENTRY_NAME"))
+        elif obj.kind in {"plcvar_analog", "plcvar_binary"}:
+            add_pair("rec", detail_map.get("REC_NAME"))
+            add_pair("asyn", detail_map.get("ASYN_NAME"))
+        elif obj.kind == "ecmc_command":
+            add_pair("cmd", detail_map.get("COMMAND") or detail_map.get("EXPANDED_COMMAND"))
+        elif obj.kind == "record_update_rate":
+            add_pair("rate", detail_map.get("RATE_MS"))
+
+        if not summary_pairs and obj.linked_file is not None:
+            add_pair("file", self._relative_display(obj.linked_file))
+        if not summary_pairs:
+            return obj.summary
+
+        display_parts: List[str] = []
+        for key, value in summary_pairs[:3]:
+            trimmed = value
+            if len(trimmed) > 44:
+                trimmed = trimmed[:41] + "..."
+            display_parts.append("{}={}".format(key, trimmed))
+        return "  |  ".join(display_parts)
+
+    def _selection_header_text(self, entry: Optional[Tuple[str, object]]) -> str:
+        if entry is None:
+            return "No object selected"
+        entry_type, payload = entry
+        if entry_type == "file":
+            return "File | {}".format(self._relative_display(payload.path))
+        if entry_type == "category-group":
+            file_path, category, count = payload
+            return "Group | {} | {} | {} object(s)".format(category, self._relative_display(file_path), count)
+        obj = payload
+        parts = [obj.kind.upper(), obj.title]
+        summary = self._tree_summary_for_object(obj)
+        if summary:
+            parts.append(summary)
+        return " | ".join(parts)
+
+    def _path_is_dirty(self, path: Optional[Path]) -> bool:
+        if path is None:
+            return False
+        resolved = path.resolve()
+        if resolved not in self.file_buffers:
+            return False
+        buffered = self.file_buffers[resolved]
+        if not resolved.exists():
+            return bool(buffered)
+        return _read_text(resolved) != buffered
+
+    def _configure_badge(self, widget, text: str, tone: str) -> None:
+        if widget is None:
+            return
+        palette = {
+            "neutral": ("#e8edf2", "#425466"),
+            "ok": ("#e6f3e6", "#2f5e34"),
+            "info": ("#e5effc", "#1f4f85"),
+            "warning": ("#fff1d6", "#8a5a00"),
+            "error": ("#f9d9dd", "#8b1e2d"),
+            "dirty": ("#ddeafe", "#0b5cad"),
+            "missing": ("#ecdef9", "#6e3ea3"),
+        }
+        background, foreground = palette.get(tone, palette["neutral"])
+        widget.configure(text=text, background=background, foreground=foreground)
+
+    def _entry_badge_snapshot(self, entry: Optional[Tuple[str, object]]) -> Tuple[str, str, str, str, str]:
+        if entry is None:
+            editor_target = self._relative_display(self.current_edit_path) if self.current_edit_path is not None else "No file open"
+            return ("None", "neutral", "No selection", "neutral", editor_target)
+
+        entry_type, payload = entry
+        issues = self._issues_for_entry(entry)
+        error_count = sum(1 for issue in issues if issue.severity == "error")
+        warning_count = sum(1 for issue in issues if issue.severity == "warning")
+        dirty = False
+        missing = False
+
+        if entry_type == "file":
+            source_text = self._relative_display(payload.path)
+            kind_text = "FILE"
+            dirty = self._path_is_dirty(payload.path)
+        elif entry_type == "category-group":
+            file_path, category, _count = payload
+            source_text = self._relative_display(file_path)
+            kind_text = category.upper()
+        else:
+            obj = payload
+            kind_text = obj.kind.upper()
+            source_text = "{}:{}".format(self._relative_display(obj.source), obj.line)
+            dirty = self._path_is_dirty(obj.source) or self._path_is_dirty(obj.linked_file)
+            missing = bool(obj.linked_file is not None and not obj.linked_file.exists())
+
+        state_parts: List[str] = []
+        tone = "ok"
+        if error_count:
+            state_parts.append("{} error{}".format(error_count, "" if error_count == 1 else "s"))
+            tone = "error"
+        elif warning_count:
+            state_parts.append("{} warning{}".format(warning_count, "" if warning_count == 1 else "s"))
+            tone = "warning"
+        elif dirty:
+            state_parts.append("Unsaved")
+            tone = "dirty"
+        elif missing:
+            state_parts.append("Missing file")
+            tone = "missing"
+        else:
+            state_parts.append("OK")
+            tone = "ok"
+
+        if dirty and "Unsaved" not in state_parts:
+            state_parts.append("Unsaved")
+        if missing and "Missing file" not in state_parts:
+            state_parts.append("Missing file")
+            if tone == "ok":
+                tone = "missing"
+        return (kind_text, "info", " • ".join(state_parts), tone, source_text)
+
+    def _update_selection_badges(self, entry: Optional[Tuple[str, object]]) -> None:
+        kind_text, kind_tone, state_text, state_tone, source_text = self._entry_badge_snapshot(entry)
+        self._configure_badge(self.selection_kind_badge, kind_text, kind_tone)
+        self._configure_badge(self.selection_state_badge, state_text, state_tone)
+        self._configure_badge(self.selection_source_badge, source_text, "neutral")
+
+    def _update_help_header(self, entry: Optional[Tuple[str, object]]) -> None:
+        issues = self._issues_for_entry(entry)
+        error_count = sum(1 for issue in issues if issue.severity == "error")
+        warning_count = sum(1 for issue in issues if issue.severity == "warning")
+        suggestions = self._help_suggestions_for_entry(entry)
+        if error_count:
+            self._configure_badge(self.help_state_badge, "{} error{}".format(error_count, "" if error_count == 1 else "s"), "error")
+            self.help_summary_var.set("Fix the errors below first. Double-click a problem to jump to source.")
+        elif warning_count:
+            self._configure_badge(self.help_state_badge, "{} warning{}".format(warning_count, "" if warning_count == 1 else "s"), "warning")
+            self.help_summary_var.set("Review warnings and suggestions below before saving.")
+        elif entry is None:
+            self._configure_badge(self.help_state_badge, "Info", "neutral")
+            self.help_summary_var.set("Select an object to see targeted problems and suggestions.")
+        else:
+            self._configure_badge(self.help_state_badge, "OK", "ok")
+            self.help_summary_var.set("{} suggestion{}".format(len(suggestions), "" if len(suggestions) == 1 else "s"))
+
+    def _status_rank(self, severity: str) -> int:
+        return {"error": 2, "warning": 1}.get(severity, 0)
+
+    def _worst_status(self, left: str, right: str) -> str:
+        return left if self._status_rank(left) >= self._status_rank(right) else right
+
+    def _tree_status_badge(self, severity: str = "", dirty: bool = False, missing: bool = False) -> str:
+        markers: List[str] = []
+        if missing:
+            markers.append("×")
+        if severity == "error":
+            markers.append("!")
+        elif severity == "warning":
+            markers.append("?")
+        if dirty:
+            markers.append("●")
+        return "[{}] ".format("".join(markers)) if markers else ""
+
+    def _tree_status_tags(self, severity: str = "", dirty: bool = False, missing: bool = False) -> Tuple[str, ...]:
+        tags: List[str] = []
+        if missing:
+            tags.append("status-missing")
+        if severity == "error":
+            tags.append("status-error")
+        elif severity == "warning":
+            tags.append("status-warning")
+        if dirty:
+            tags.append("status-dirty")
+        return tuple(tags)
+
     def _object_tree_key(self, obj: StartupObject) -> Tuple[Path, int, str, str]:
         return (obj.source.resolve(), obj.line, obj.kind, obj.title)
 
     def _tree_label_for_object(self, obj: StartupObject, flow_index: Optional[int]) -> str:
+        title = self._prefixed_tree_text(self._tree_object_symbol(obj.kind), obj.title)
         if flow_index is None:
-            return obj.title
-        return "{:02d} ↓ {}".format(flow_index, obj.title)
+            return title
+        return "{:02d} ↓ {}".format(flow_index, title)
 
     def _on_editor_scrollbar(self, *args) -> None:
         self.editor_text.yview(*args)
@@ -3972,8 +5320,53 @@ class ValidatorApp:
     def _focus_editor_search(self, _event=None) -> str:
         if self.editor_search_entry is not None:
             self.editor_search_entry.focus_set()
+            if self._editor_search_placeholder_visible:
+                self._clear_editor_search_placeholder()
             self.editor_search_entry.selection_range(0, "end")
         return "break"
+
+    def _set_editor_search_placeholder(self) -> None:
+        if self.editor_search_entry is None:
+            return
+        if self.editor_search_var.get().strip():
+            return
+        self._editor_search_placeholder_visible = True
+        self.editor_search_var.set("Find in current file")
+        self.editor_search_entry.configure(fg="#7a7a7a", highlightbackground="#d0cabf", highlightcolor="#c1b7a6")
+
+    def _clear_editor_search_placeholder(self) -> None:
+        if self.editor_search_entry is None or not self._editor_search_placeholder_visible:
+            return
+        self._editor_search_placeholder_visible = False
+        self.editor_search_var.set("")
+        self.editor_search_entry.configure(fg="#222222", highlightbackground="#d0cabf", highlightcolor="#8fb7e1")
+
+    def _effective_editor_search_query(self) -> str:
+        if self._editor_search_placeholder_visible:
+            return ""
+        return self.editor_search_var.get().strip()
+
+    def _on_editor_search_focus_in(self, _event=None) -> None:
+        self._clear_editor_search_placeholder()
+
+    def _on_editor_search_focus_out(self, _event=None) -> None:
+        if not self.editor_search_var.get().strip():
+            self._set_editor_search_placeholder()
+
+    def _on_ctrl_shift_s(self, _event=None) -> str:
+        self._save_all_files()
+        return "break"
+
+    def _on_tree_delete(self, _event=None) -> str:
+        self._remove_selected_object()
+        return "break"
+
+    def _on_editor_assist_setting_changed(self) -> None:
+        if not self.editor_macro_hover_var.get():
+            self._hide_editor_macro_tooltip()
+        if not self.editor_auto_complete_var.get():
+            self._hide_editor_completion()
+        self._schedule_editor_update()
 
     def _show_combobox_dropdown(self, combobox) -> None:
         try:
@@ -4236,7 +5629,11 @@ class ValidatorApp:
     def _run_editor_update(self) -> None:
         self._editor_update_job = None
         self._update_editor_visuals()
-        self._update_editor_completion(self._editor_completion_forced or self._editor_completion_should_open)
+        if self.editor_auto_complete_var.get() or self._editor_completion_forced:
+            self._update_editor_completion(self._editor_completion_forced or self._editor_completion_should_open)
+        else:
+            self._hide_editor_completion()
+        self._refresh_resolved_preview()
         self._editor_completion_forced = False
         self._editor_completion_should_open = False
 
@@ -4247,6 +5644,15 @@ class ValidatorApp:
             except Exception:
                 pass
         self._editor_tree_sync_job = self.root.after(delay_ms, self._run_tree_sync_from_editor)
+
+    def _cancel_tree_sync_from_editor(self) -> None:
+        if self._editor_tree_sync_job is None:
+            return
+        try:
+            self.root.after_cancel(self._editor_tree_sync_job)
+        except Exception:
+            pass
+        self._editor_tree_sync_job = None
 
     def _run_tree_sync_from_editor(self) -> None:
         self._editor_tree_sync_job = None
@@ -4268,7 +5674,17 @@ class ValidatorApp:
         keysym = getattr(_event, "keysym", "")
         char = getattr(_event, "char", "")
         self._hide_editor_macro_tooltip()
-        self._editor_completion_should_open = bool(char and (char.isalnum() or char in "._"))
+        popup_open = bool(
+            self.editor_completion_popup is not None
+            and self.editor_completion_popup.winfo_viewable()
+        )
+        should_open = False
+        if self.editor_auto_complete_var.get():
+            if char == ".":
+                should_open = True
+            elif popup_open and (char.isalnum() or char == "_" or keysym in {"BackSpace", "Delete"}):
+                should_open = True
+        self._editor_completion_should_open = should_open
         self._schedule_editor_update()
         navigation_keys = {
             "Up",
@@ -4287,16 +5703,18 @@ class ValidatorApp:
 
     def _on_editor_mouse_press(self, _event=None) -> None:
         self._editor_mouse_interacting_until = time.monotonic() + 0.4
+        self._cancel_tree_sync_from_editor()
         self._hide_editor_macro_tooltip()
         self._hide_editor_completion()
 
     def _on_editor_clicked(self, _event=None) -> None:
         self._editor_mouse_interacting_until = time.monotonic() + 0.35
+        self._cancel_tree_sync_from_editor()
         self._editor_completion_should_open = False
         self._schedule_editor_update()
 
     def _on_editor_mouse_motion(self, event=None) -> None:
-        if event is None:
+        if event is None or not self.editor_macro_hover_var.get():
             return
         context = self._editor_macro_hover_context(event)
         if context is None:
@@ -4311,7 +5729,7 @@ class ValidatorApp:
         self._hide_editor_macro_tooltip()
         self._editor_macro_hover_token = token
         self._editor_macro_hover_event = event
-        self._editor_macro_hover_job = self.root.after(350, self._show_editor_macro_tooltip)
+        self._editor_macro_hover_job = self.root.after(650, self._show_editor_macro_tooltip)
 
     def _on_editor_mouse_leave(self, _event=None) -> None:
         self._hide_editor_macro_tooltip()
@@ -4414,7 +5832,7 @@ class ValidatorApp:
     def _update_search_highlight(self) -> None:
         self.editor_text.tag_remove("search_match", "1.0", "end")
         self.editor_text.tag_remove("search_current", "1.0", "end")
-        query = self.editor_search_var.get().strip()
+        query = self._effective_editor_search_query()
         if not query:
             return
         start = "1.0"
@@ -4437,7 +5855,7 @@ class ValidatorApp:
             self.editor_text.tag_add("search_current", current_start, current_end)
 
     def _goto_search_match(self, forward: bool = True) -> None:
-        query = self.editor_search_var.get().strip()
+        query = self._effective_editor_search_query()
         if not query:
             return
         insert_index = self.editor_text.index("insert")
@@ -4641,27 +6059,62 @@ class ValidatorApp:
             return int(expanded)
         return None
 
-    def _current_editor_completion_context(self) -> Optional[Dict[str, object]]:
-        if self._editor_language() not in {"yaml", "plc"} or self.current_edit_path is None:
+    def _resolve_editor_ec_path_base(
+        self, text: str, macro_map: Dict[str, str]
+    ) -> Optional[Tuple[int, int, str]]:
+        cleaned = _strip_wrapper_pairs(_normalize_value(text))
+        if not cleaned:
             return None
-
-        insert_index = self.editor_text.index("insert")
-        line_no = int(insert_index.split(".")[0])
-        line_to_cursor = self.editor_text.get("{}.0".format(line_no), insert_index)
-        token_pattern = r"(?:\d+|\$\{[A-Za-z0-9_]+(?:=[^}]*)?\}|\$\([A-Za-z0-9_]+(?:=[^\)]*)?\))"
-        match = re.search(
-            r"ec(?P<master>{token})\.s(?P<slave>{token})\.(?P<entry>[A-Za-z_][A-Za-z0-9_]*)?$".format(token=token_pattern),
-            line_to_cursor,
-        )
+        expanded = _expand_text_macros(cleaned, macro_map).strip()
+        match = re.search(r"\bec(?P<master>\d+)\.s(?P<slave>\d+)\b", expanded)
         if match is None:
             return None
-
-        macro_map = self._editor_known_macro_map()
-        master_id = self._resolve_editor_numeric_token(match.group("master"), macro_map)
-        slave_id = self._resolve_editor_numeric_token(match.group("slave"), macro_map)
+        master_id = _parse_int_value(match.group("master"))
+        slave_id = _parse_int_value(match.group("slave"))
         if master_id is None or slave_id is None:
             return None
-        entry_prefix = match.group("entry") or ""
+        return master_id, slave_id, match.group(0)
+
+    def _editor_plc_ec_aliases(self, macro_map: Dict[str, str]) -> Dict[str, Tuple[int, int, str]]:
+        if self._editor_language() != "plc":
+            return {}
+        text = self.editor_text.get("1.0", "end-1c")
+        aliases: Dict[str, Tuple[int, int, str]] = {}
+        in_var_block = False
+        for raw_line in text.splitlines():
+            line = _strip_inline_comment(raw_line).strip()
+            if not line:
+                continue
+            upper_line = line.upper()
+            if upper_line == "VAR":
+                in_var_block = True
+                continue
+            if upper_line == "END_VAR":
+                in_var_block = False
+                continue
+            if not in_var_block:
+                continue
+            declaration_match = re.match(
+                r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<value>[^;]+?)\s*;?\s*$",
+                line,
+            )
+            if declaration_match is None:
+                continue
+            resolved = self._resolve_editor_ec_path_base(declaration_match.group("value"), macro_map)
+            if resolved is None:
+                continue
+            aliases[declaration_match.group("name")] = resolved
+        return aliases
+
+    def _build_editor_completion_context(
+        self,
+        master_id: int,
+        slave_id: int,
+        entry_prefix: str,
+        start_index: str,
+        end_index: str,
+        source_label: str = "",
+    ) -> Optional[Dict[str, object]]:
         slave_hw_desc = self._startup_slave_hw_desc_map().get(slave_id, "")
         if not slave_hw_desc:
             return None
@@ -4674,8 +6127,6 @@ class ValidatorApp:
         if not matches:
             return None
 
-        start_col = len(line_to_cursor) - len(entry_prefix)
-        start_index = "{}.{}".format(line_no, start_col)
         return {
             "master_id": master_id,
             "slave_id": slave_id,
@@ -4683,8 +6134,54 @@ class ValidatorApp:
             "entry_prefix": entry_prefix,
             "matches": matches,
             "start_index": start_index,
-            "end_index": insert_index,
+            "end_index": end_index,
+            "source_label": source_label,
         }
+
+    def _current_editor_completion_context(self) -> Optional[Dict[str, object]]:
+        if self._editor_language() not in {"yaml", "plc"} or self.current_edit_path is None:
+            return None
+
+        insert_index = self.editor_text.index("insert")
+        line_no = int(insert_index.split(".")[0])
+        line_to_cursor = self.editor_text.get("{}.0".format(line_no), insert_index)
+        macro_map = self._editor_known_macro_map()
+        token_pattern = r"(?:\d+|\$\{[A-Za-z0-9_]+(?:=[^}]*)?\}|\$\([A-Za-z0-9_]+(?:=[^\)]*)?\))"
+        match = re.search(
+            r"ec(?P<master>{token})\.s(?P<slave>{token})\.(?P<entry>[A-Za-z_][A-Za-z0-9_]*)?$".format(token=token_pattern),
+            line_to_cursor,
+        )
+        if match is not None:
+            master_id = self._resolve_editor_numeric_token(match.group("master"), macro_map)
+            slave_id = self._resolve_editor_numeric_token(match.group("slave"), macro_map)
+            if master_id is None or slave_id is None:
+                return None
+            entry_prefix = match.group("entry") or ""
+            start_col = len(line_to_cursor) - len(entry_prefix)
+            start_index = "{}.{}".format(line_no, start_col)
+            return self._build_editor_completion_context(master_id, slave_id, entry_prefix, start_index, insert_index)
+
+        if self._editor_language() == "plc":
+            alias_match = re.search(r"(?P<alias>[A-Za-z_][A-Za-z0-9_]*)\.(?P<entry>[A-Za-z_][A-Za-z0-9_]*)?$", line_to_cursor)
+            if alias_match is None:
+                return None
+            alias_name = alias_match.group("alias")
+            alias_info = self._editor_plc_ec_aliases(macro_map).get(alias_name)
+            if alias_info is None:
+                return None
+            master_id, slave_id, resolved_path = alias_info
+            entry_prefix = alias_match.group("entry") or ""
+            start_col = len(line_to_cursor) - len(entry_prefix)
+            start_index = "{}.{}".format(line_no, start_col)
+            return self._build_editor_completion_context(
+                master_id,
+                slave_id,
+                entry_prefix,
+                start_index,
+                insert_index,
+                source_label="{} -> {}".format(alias_name, resolved_path),
+            )
+        return None
 
     def _ensure_editor_completion_popup(self) -> None:
         if self.editor_completion_popup is not None and self.editor_completion_popup.winfo_exists():
@@ -4728,9 +6225,11 @@ class ValidatorApp:
                 previous_value = self.editor_completion_listbox.get(selection[0])
         self.editor_completion_candidates = matches
         self.editor_completion_range = (str(context["start_index"]), str(context["end_index"]))
-        self.editor_completion_label_var.set(
-            "ec{}.s{} | {}".format(context["master_id"], context["slave_id"], context["hw_desc"])
-        )
+        label = "ec{}.s{} | {}".format(context["master_id"], context["slave_id"], context["hw_desc"])
+        source_label = str(context.get("source_label", "") or "").strip()
+        if source_label:
+            label = "{} | {}".format(source_label, label)
+        self.editor_completion_label_var.set(label)
 
         self.editor_completion_listbox.delete(0, self.tk.END)
         for item in matches:
@@ -4855,6 +6354,8 @@ class ValidatorApp:
         self.startup_tree.see(item_id)
 
     def _populate_param_tree_for_entry(self, entry_type: str, payload) -> None:
+        self._update_selection_badges((entry_type, payload))
+        self.selection_header_var.set(self._selection_header_text((entry_type, payload)))
         if entry_type == "file":
             file_node = payload
             rows = [
@@ -4865,6 +6366,19 @@ class ValidatorApp:
             if file_node.parent_path is not None:
                 rows.insert(1, ("PARENT_FILE", self._relative_display(file_node.parent_path)))
             self._populate_param_tree(rows)
+            self._refresh_quick_edit_panel((entry_type, payload))
+            return
+        if entry_type == "category-group":
+            file_path, category, count = payload
+            self._populate_param_tree(
+                [
+                    ("TYPE", "group"),
+                    ("CATEGORY", category),
+                    ("FILE", self._relative_display(file_path)),
+                    ("OBJECTS", str(count)),
+                ]
+            )
+            self._refresh_quick_edit_panel(None)
             return
 
         obj = payload
@@ -4883,6 +6397,7 @@ class ValidatorApp:
             rows.append((key, value))
             seen_keys.add(key)
         self._populate_param_tree(rows)
+        self._refresh_quick_edit_panel((entry_type, payload))
 
     def _sync_tree_selection_from_editor(self) -> None:
         if self.current_edit_path is None:
@@ -5009,8 +6524,10 @@ class ValidatorApp:
         self.current_edit_linked_object_key = linked_object_key
         self.editor_file_var.set(str(resolved))
         self._set_editor_content(content, line=line)
+        self._highlight_tree_target_line(line)
         self._sync_file_browser_selection(resolved)
         self._refresh_context_panel()
+        self._refresh_resolved_preview()
         self.status_var.set(f"Opened {resolved.name}")
 
     def _highlight_editor_line(self, line: Optional[int]) -> None:
@@ -5020,6 +6537,31 @@ class ValidatorApp:
         self.editor_text.mark_set("insert", start)
         self.editor_text.see(start)
         self._highlight_current_editor_line()
+
+    def _highlight_tree_target_line(self, line: Optional[int]) -> None:
+        self.editor_text.tag_remove("tree_target_line", "1.0", "end")
+        self.editor_gutter.tag_remove("tree_target_line", "1.0", "end")
+        if self._editor_target_line_clear_job is not None:
+            try:
+                self.root.after_cancel(self._editor_target_line_clear_job)
+            except Exception:
+                pass
+        self._editor_target_line_clear_job = None
+        if line is None or line <= 0:
+            return
+        start = f"{line}.0"
+        end = f"{line}.0 lineend +1c"
+        self.editor_text.tag_add("tree_target_line", start, end)
+        self.editor_gutter.tag_add("tree_target_line", start, end)
+        self.editor_text.tag_raise("tree_target_line")
+        self.editor_gutter.tag_raise("tree_target_line")
+        self._editor_target_line_clear_job = self.root.after(
+            2400,
+            lambda: (
+                self.editor_text.tag_remove("tree_target_line", "1.0", "end"),
+                self.editor_gutter.tag_remove("tree_target_line", "1.0", "end"),
+            ),
+        )
 
     def _save_current_file(self) -> None:
         from tkinter import messagebox
@@ -5080,6 +6622,7 @@ class ValidatorApp:
         content = _read_text(self.current_edit_path)
         self.file_buffers[self.current_edit_path] = content
         self._set_editor_content(content)
+        self._refresh_resolved_preview()
         self.status_var.set(f"Reloaded {self.current_edit_path.name}")
 
     def _refresh_startup_tree(self) -> None:
@@ -5111,6 +6654,7 @@ class ValidatorApp:
         self._populate_startup_tree(startup_path, self.latest_startup_tree, tree_state=tree_state)
         self._populate_file_browser(startup_path)
         self._refresh_context_panel()
+        self._refresh_resolved_preview()
         self.status_var.set(f"Loaded {startup_path.name}")
 
     def _validate_current_project(self) -> None:
@@ -5157,13 +6701,16 @@ class ValidatorApp:
         entry_type, payload = entry
         if entry_type == "file":
             return ("file", payload.path.resolve())
+        if entry_type == "category-group":
+            file_path, category, _count = payload
+            return ("category-group", file_path.resolve(), category)
         if not isinstance(payload, StartupObject):
             return None
         object_key = self._object_tree_key(payload)
         if entry_type == "object":
             return ("object", object_key)
         if entry_type in {"detail", "linked-detail"}:
-            return (entry_type, object_key, self.startup_tree.item(item_id, "text"))
+            return (entry_type, object_key, self._tree_text_logical_name(self.startup_tree.item(item_id, "text")))
         if entry_type in {"detail-group", "linked-detail-group", "linked-file"}:
             return (entry_type, object_key)
         return None
@@ -5209,32 +6756,271 @@ class ValidatorApp:
         self.param_tree.delete(*self.param_tree.get_children(""))
         expanded_keys = set(tree_state.get("expanded", set())) if tree_state else set()
         selected_key = tree_state.get("selected") if tree_state else None
+        issue_severity_by_path: Dict[Path, str] = {}
+        issue_severity_by_object_key: Dict[Tuple[Path, int, str, str], str] = {}
+        dirty_state_by_path: Dict[Path, bool] = {}
+        filter_kind = self._tree_filter_kind()
+        tree_view_mode = self._tree_view_mode()
+        tree_sort_mode = self._tree_sort_mode()
+        search_query = self._tree_search_query()
+        compact_view = bool(self.tree_compact_var.get())
+        filtered_view = compact_view or filter_kind != "all" or bool(search_query)
+        total_objects = 0
+        total_slaves = 0
+        total_axes = 0
+        total_plcs = 0
+        visible_objects = 0
+        total_errors = 0
+        total_warnings = 0
+        total_dirty = 0
+        total_missing = 0
+
+        if self.latest_result is not None:
+            for issue in self.latest_result.issues:
+                if issue.severity not in {"error", "warning"}:
+                    continue
+                source_path = issue.source.resolve()
+                issue_severity_by_path[source_path] = self._worst_status(
+                    issue_severity_by_path.get(source_path, ""),
+                    issue.severity,
+                )
+                for file_node in startup_tree.files:
+                    for obj in file_node.objects:
+                        object_key = self._object_tree_key(obj)
+                        if source_path == obj.source.resolve() and issue.line == obj.line:
+                            issue_severity_by_object_key[object_key] = self._worst_status(
+                                issue_severity_by_object_key.get(object_key, ""),
+                                issue.severity,
+                            )
+                        elif obj.linked_file is not None and source_path == obj.linked_file.resolve():
+                            issue_severity_by_object_key[object_key] = self._worst_status(
+                                issue_severity_by_object_key.get(object_key, ""),
+                                issue.severity,
+                            )
+
+        def path_is_dirty(path: Optional[Path]) -> bool:
+            if path is None:
+                return False
+            resolved = path.resolve()
+            if resolved in dirty_state_by_path:
+                return dirty_state_by_path[resolved]
+            if resolved not in self.file_buffers:
+                dirty_state_by_path[resolved] = False
+                return False
+            buffered = self.file_buffers[resolved]
+            if not resolved.exists():
+                dirty_state_by_path[resolved] = bool(buffered)
+                return dirty_state_by_path[resolved]
+            dirty_state_by_path[resolved] = _read_text(resolved) != buffered
+            return dirty_state_by_path[resolved]
 
         file_items: Dict[Path, str] = {}
         for file_node in startup_tree.files:
+            total_objects += len(file_node.objects)
+            total_slaves += sum(1 for obj in file_node.objects if obj.kind == "slave")
+            total_axes += sum(1 for obj in file_node.objects if obj.kind == "axis")
+            total_plcs += sum(1 for obj in file_node.objects if obj.kind == "plc")
             parent_item = ""
             if file_node.parent_path is not None:
                 parent_item = file_items.get(file_node.parent_path, "")
+            file_path = file_node.path.resolve()
+            file_severity = issue_severity_by_path.get(file_path, "")
+            file_dirty = path_is_dirty(file_path)
+            if file_severity == "error":
+                total_errors += 1
+            elif file_severity == "warning":
+                total_warnings += 1
+            if file_dirty:
+                total_dirty += 1
+            parent_key_by_key: Dict[Tuple[Path, int, str, str], Optional[Tuple[Path, int, str, str]]] = {}
+            visible_object_keys: Set[Tuple[Path, int, str, str]] = set()
+            slave_keys: Dict[int, Tuple[Path, int, str, str]] = {}
+            axis_keys: Dict[int, Tuple[Path, int, str, str]] = {}
+            plc_keys: Dict[int, Tuple[Path, int, str, str]] = {}
+            last_plc_key: Optional[Tuple[Path, int, str, str]] = None
+
+            for obj in file_node.objects:
+                object_key = self._object_tree_key(obj)
+                parent_key = None
+                if obj.kind in {"component", "ecsdo", "ecdataitem", "slave_config"} and obj.parent_slave_id is not None:
+                    parent_key = slave_keys.get(obj.parent_slave_id)
+                elif obj.kind == "encoder" and obj.parent_axis_line is not None:
+                    parent_key = axis_keys.get(obj.parent_axis_line)
+                elif obj.kind in {"plcvar_analog", "plcvar_binary"}:
+                    if obj.parent_plc_id is not None:
+                        parent_key = plc_keys.get(obj.parent_plc_id, last_plc_key)
+                    else:
+                        parent_key = last_plc_key
+                parent_key_by_key[object_key] = parent_key
+
+                object_severity = issue_severity_by_object_key.get(object_key, "")
+                source_dirty = path_is_dirty(obj.source)
+                linked_dirty = path_is_dirty(obj.linked_file) if obj.linked_file is not None else False
+                linked_missing = bool(obj.linked_file is not None and not obj.linked_file.exists())
+                if object_severity == "error":
+                    total_errors += 1
+                elif object_severity == "warning":
+                    total_warnings += 1
+                if source_dirty or linked_dirty:
+                    total_dirty += 1
+                if linked_missing:
+                    total_missing += 1
+                if self._object_matches_tree_view(
+                    obj,
+                    filter_kind,
+                    search_query,
+                    object_severity,
+                    source_dirty,
+                    linked_dirty,
+                    linked_missing,
+                ):
+                    visible_object_keys.add(object_key)
+
+                if obj.kind == "slave" and obj.slave_id is not None:
+                    slave_keys[obj.slave_id] = object_key
+                if obj.kind == "axis":
+                    axis_keys[obj.line] = object_key
+                if obj.kind == "plc":
+                    last_plc_key = object_key
+                    if obj.parent_plc_id is not None:
+                        plc_keys[obj.parent_plc_id] = object_key
+                    else:
+                        for key, value in obj.details:
+                            if key == "PLC_ID":
+                                parsed_plc_id = _parse_int_value(value)
+                                if parsed_plc_id is not None:
+                                    plc_keys[parsed_plc_id] = object_key
+                                break
+
+            for object_key in list(visible_object_keys):
+                parent_key = parent_key_by_key.get(object_key)
+                while parent_key is not None and parent_key not in visible_object_keys:
+                    visible_object_keys.add(parent_key)
+                    parent_key = parent_key_by_key.get(parent_key)
+
+            file_badge = self._tree_status_badge(severity=file_severity, dirty=file_dirty)
+            file_tags = ("node-file",) + self._tree_status_tags(severity=file_severity, dirty=file_dirty)
+            visible_file_objects = sum(1 for obj in file_node.objects if self._object_tree_key(obj) in visible_object_keys)
+            visible_objects += visible_file_objects
+            file_summary = "{} object(s)".format(len(file_node.objects))
+            if filtered_view:
+                file_summary = "{} / {} shown".format(visible_file_objects, len(file_node.objects))
             file_item = self.startup_tree.insert(
                 parent_item,
                 "end",
-                text=self._relative_display(file_node.path),
-                values=("FILE", "{} object(s)".format(len(file_node.objects))),
-                open=("file", file_node.path.resolve()) in expanded_keys or file_node.path.resolve() == startup_path.resolve(),
-                tags=("node-file",),
+                text=file_badge + self._prefixed_tree_text("▣", self._relative_display(file_node.path)),
+                values=(file_summary,),
+                open=filtered_view
+                or ("file", file_node.path.resolve()) in expanded_keys
+                or file_node.path.resolve() == startup_path.resolve(),
+                tags=file_tags,
             )
             file_items[file_node.path] = file_item
             self.file_tree_items[file_node.path.resolve()] = file_item
             self.startup_item_map[file_item] = ("file", file_node)
+            category_items: Dict[str, str] = {}
+            if tree_view_mode == "objects":
+                category_counts: Dict[str, int] = {}
+                category_errors: Dict[str, int] = {}
+                category_warnings: Dict[str, int] = {}
+                category_dirty: Dict[str, int] = {}
+                category_missing: Dict[str, int] = {}
+                for obj in file_node.objects:
+                    object_key = self._object_tree_key(obj)
+                    if object_key not in visible_object_keys or parent_key_by_key.get(object_key) is not None:
+                        continue
+                    category = self._tree_category_for_object(obj)
+                    category_counts[category] = category_counts.get(category, 0) + 1
+                    object_severity = issue_severity_by_object_key.get(object_key, "")
+                    if object_severity == "error":
+                        category_errors[category] = category_errors.get(category, 0) + 1
+                    elif object_severity == "warning":
+                        category_warnings[category] = category_warnings.get(category, 0) + 1
+                    object_dirty = path_is_dirty(obj.source) or (
+                        obj.linked_file is not None and path_is_dirty(obj.linked_file)
+                    )
+                    if object_dirty:
+                        category_dirty[category] = category_dirty.get(category, 0) + 1
+                    if obj.linked_file is not None and not obj.linked_file.exists():
+                        category_missing[category] = category_missing.get(category, 0) + 1
+                for category in ("Slaves", "Axes", "PLCs", "Macros", "ECMC", "Other"):
+                    count = category_counts.get(category, 0)
+                    if count <= 0:
+                        continue
+                    category_error_count = category_errors.get(category, 0)
+                    category_warning_count = category_warnings.get(category, 0)
+                    category_dirty_count = category_dirty.get(category, 0)
+                    category_missing_count = category_missing.get(category, 0)
+                    category_badge = self._tree_status_badge(
+                        severity="error" if category_error_count else ("warning" if category_warning_count else ""),
+                        dirty=category_dirty_count > 0,
+                        missing=category_missing_count > 0,
+                    )
+                    category_tags = ("node-category",) + self._tree_status_tags(
+                        severity="error" if category_error_count else ("warning" if category_warning_count else ""),
+                        dirty=category_dirty_count > 0,
+                        missing=category_missing_count > 0,
+                    )
+                    category_item = self.startup_tree.insert(
+                        file_item,
+                        "end",
+                        text=category_badge + self._prefixed_tree_text("▸", category),
+                        values=(
+                            self._tree_category_summary_text(
+                                count,
+                                category_error_count,
+                                category_warning_count,
+                                category_dirty_count,
+                                category_missing_count,
+                            ),
+                        ),
+                        open=filtered_view
+                        or ("category-group", file_node.path.resolve(), category) in expanded_keys,
+                        tags=category_tags,
+                    )
+                    category_items[category] = category_item
+                    self.startup_item_map[category_item] = ("category-group", (file_node.path.resolve(), category, count))
             slave_items: Dict[int, str] = {}
             axis_items: Dict[int, str] = {}
             plc_items: Dict[int, str] = {}
             last_plc_item = ""
             top_level_flow_index = 0
+            ordered_objects = list(file_node.objects)
+            if tree_view_mode == "objects":
+                object_by_key = {self._object_tree_key(obj): obj for obj in file_node.objects}
 
-            for obj in file_node.objects:
+                def top_level_key_for(object_key: Tuple[Path, int, str, str]) -> Tuple[Path, int, str, str]:
+                    current_key = object_key
+                    parent_key = parent_key_by_key.get(current_key)
+                    while parent_key is not None:
+                        current_key = parent_key
+                        parent_key = parent_key_by_key.get(current_key)
+                    return current_key
+
+                top_level_keys = [
+                    self._object_tree_key(obj)
+                    for obj in file_node.objects
+                    if self._object_tree_key(obj) in visible_object_keys and parent_key_by_key.get(self._object_tree_key(obj)) is None
+                ]
+                sorted_top_level_keys = sorted(
+                    top_level_keys,
+                    key=lambda key: self._tree_sort_value_for_object(object_by_key[key], tree_sort_mode),
+                )
+                top_level_rank = {key: index for index, key in enumerate(sorted_top_level_keys)}
+                ordered_objects = sorted(
+                    file_node.objects,
+                    key=lambda obj: (
+                        top_level_rank.get(top_level_key_for(self._object_tree_key(obj)), len(sorted_top_level_keys)),
+                        self._object_tree_key(obj)[1],
+                    ),
+                )
+
+            for obj in ordered_objects:
+                object_key = self._object_tree_key(obj)
+                if object_key not in visible_object_keys:
+                    continue
                 obj_parent_item = file_item
-                if obj.kind in {"component", "ecsdo", "ecdataitem"} and obj.parent_slave_id is not None:
+                if obj.kind in {"component", "ecsdo", "ecdataitem", "slave_config"} and obj.parent_slave_id is not None:
                     obj_parent_item = slave_items.get(obj.parent_slave_id, file_item)
                 elif obj.kind == "encoder" and obj.parent_axis_line is not None:
                     obj_parent_item = axis_items.get(obj.parent_axis_line, file_item)
@@ -5243,18 +7029,26 @@ class ValidatorApp:
                         obj_parent_item = plc_items.get(obj.parent_plc_id, last_plc_item or file_item)
                     elif last_plc_item:
                         obj_parent_item = last_plc_item
+                if obj_parent_item == file_item and tree_view_mode == "objects":
+                    obj_parent_item = category_items.get(self._tree_category_for_object(obj), file_item)
                 flow_index = None
                 if obj_parent_item == file_item:
                     top_level_flow_index += 1
                     flow_index = top_level_flow_index
-                object_key = self._object_tree_key(obj)
+                object_severity = issue_severity_by_object_key.get(object_key, "")
+                linked_missing = bool(obj.linked_file is not None and not obj.linked_file.exists())
+                object_badge = self._tree_status_badge(severity=object_severity, missing=linked_missing)
+                object_tags = self._tree_tags_for_object(obj) + self._tree_status_tags(
+                    severity=object_severity,
+                    missing=linked_missing,
+                )
                 obj_item = self.startup_tree.insert(
                     obj_parent_item,
                     "end",
-                    text=self._tree_label_for_object(obj, flow_index),
-                    values=(obj.kind.upper(), obj.summary),
+                    text=object_badge + self._tree_label_for_object(obj, flow_index),
+                    values=(self._tree_summary_for_object(obj),),
                     open=("object", object_key) in expanded_keys,
-                    tags=self._tree_tags_for_object(obj),
+                    tags=object_tags,
                 )
                 self.startup_item_map[obj_item] = ("object", obj)
                 self.object_tree_items[object_key] = obj_item
@@ -5275,14 +7069,28 @@ class ValidatorApp:
                                 break
 
                 link_item = None
-                if obj.linked_file is not None:
+                if obj.linked_file is not None and not compact_view:
+                    linked_path = obj.linked_file.resolve()
+                    linked_severity = issue_severity_by_path.get(linked_path, "")
+                    linked_dirty = path_is_dirty(linked_path)
+                    linked_missing = not obj.linked_file.exists()
+                    linked_badge = self._tree_status_badge(
+                        severity=linked_severity,
+                        dirty=linked_dirty,
+                        missing=linked_missing,
+                    )
+                    linked_tags = ("node-link",) + self._tree_status_tags(
+                        severity=linked_severity,
+                        dirty=linked_dirty,
+                        missing=linked_missing,
+                    )
                     link_item = self.startup_tree.insert(
                         obj_item,
                         "end",
-                        text="FILE",
-                        values=("LINK", self._relative_display(obj.linked_file)),
+                        text=linked_badge + self._prefixed_tree_text("↗", "File"),
+                        values=(self._relative_display(obj.linked_file),),
                         open=("linked-file", object_key) in expanded_keys,
-                        tags=("node-link",),
+                        tags=linked_tags,
                     )
                     self.startup_item_map[link_item] = ("linked-file", obj)
                     self.linked_file_tree_items.setdefault(obj.linked_file.resolve(), []).append(link_item)
@@ -5291,12 +7099,12 @@ class ValidatorApp:
                 detail_skip = set()
                 if obj.linked_file is not None:
                     detail_skip.add("FILE")
-                if obj.command_details:
+                if obj.command_details and not compact_view:
                     command_group_item = self.startup_tree.insert(
                         obj_item,
                         "end",
-                        text="Macros",
-                        values=("GROUP", "{} macro(s)".format(len(obj.command_details))),
+                        text=self._prefixed_tree_text("≡", "Macros"),
+                        values=("{} macro(s)".format(len(obj.command_details)),),
                         open=("detail-group", object_key) in expanded_keys,
                         tags=("group-command",),
                     )
@@ -5306,19 +7114,19 @@ class ValidatorApp:
                         detail_item = self.startup_tree.insert(
                             command_group_item,
                             "end",
-                            text=key,
-                            values=("MACRO", value),
+                            text=self._prefixed_tree_text("·", key),
+                            values=(value,),
                             tags=("node-detail",),
                         )
                         self.startup_item_map[detail_item] = ("detail", obj)
 
-                if obj.linked_file_details:
+                if obj.linked_file_details and not compact_view:
                     linked_parent_item = link_item if link_item is not None else obj_item
                     linked_group_item = self.startup_tree.insert(
                         linked_parent_item,
                         "end",
-                        text="Macros",
-                        values=("GROUP", "{} macro(s)".format(len(obj.linked_file_details))),
+                        text=self._prefixed_tree_text("≡", "Macros"),
+                        values=("{} macro(s)".format(len(obj.linked_file_details)),),
                         open=("linked-detail-group", object_key) in expanded_keys,
                         tags=("group-linked",),
                     )
@@ -5328,20 +7136,22 @@ class ValidatorApp:
                         detail_item = self.startup_tree.insert(
                             linked_group_item,
                             "end",
-                            text=key,
-                            values=("MACRO", value),
+                            text=self._prefixed_tree_text("·", key),
+                            values=(value,),
                             tags=("node-link",),
                         )
                         self.startup_item_map[detail_item] = ("linked-detail", obj)
 
                 for key, value in obj.details:
+                    if compact_view:
+                        continue
                     if key in detail_skip:
                         continue
                     detail_item = self.startup_tree.insert(
                         obj_item,
                         "end",
-                        text=key,
-                        values=("MACRO", value),
+                        text=self._prefixed_tree_text("·", key),
+                        values=(value,),
                         tags=("node-detail",),
                     )
                     self.startup_item_map[detail_item] = ("detail", obj)
@@ -5353,6 +7163,40 @@ class ValidatorApp:
             self.startup_tree.selection_set(target_item)
             self.startup_tree.focus(target_item)
             self.startup_tree.see(target_item)
+        overview_prefix = "Grouped" if tree_view_mode == "objects" else "Objects"
+        if filtered_view:
+            self.tree_overview_var.set(
+                "{}  •  {} shown / {} objects  •  {} slaves  •  {} axes  •  {} PLC".format(
+                    overview_prefix,
+                    visible_objects,
+                    total_objects,
+                    total_slaves,
+                    total_axes,
+                    total_plcs,
+                )
+            )
+        else:
+            self.tree_overview_var.set(
+                "{}  •  {} objects  •  {} slaves  •  {} axes  •  {} PLC".format(
+                    overview_prefix,
+                    total_objects,
+                    total_slaves,
+                    total_axes,
+                    total_plcs,
+                )
+            )
+        self.tree_error_var.set("{} error{}".format(total_errors, "" if total_errors == 1 else "s"))
+        self.tree_warning_var.set("{} warning{}".format(total_warnings, "" if total_warnings == 1 else "s"))
+        self.tree_unsaved_var.set("{} unsaved".format(total_dirty))
+        self.tree_missing_var.set("{} missing".format(total_missing))
+        if self.tree_error_button is not None:
+            self.tree_error_button.configure(state="normal" if total_errors else "disabled")
+        if self.tree_warning_button is not None:
+            self.tree_warning_button.configure(state="normal" if total_warnings else "disabled")
+        if self.tree_unsaved_button is not None:
+            self.tree_unsaved_button.configure(state="normal" if total_dirty else "disabled")
+        if self.tree_missing_button is not None:
+            self.tree_missing_button.configure(state="normal" if total_missing else "disabled")
 
     def _relative_display(self, path: Path) -> str:
         if self.ecmccfg_root is not None:
@@ -5368,12 +7212,135 @@ class ValidatorApp:
                 pass
         return str(path)
 
+    def _ordered_param_rows(self, rows: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+        priority = {
+            "TYPE": 0,
+            "TITLE": 1,
+            "PATH": 2,
+            "FILE": 3,
+            "SOURCE": 4,
+            "HW_DESC": 5,
+            "SLAVE_ID": 6,
+            "AXIS_ID": 7,
+            "AX_NAME": 8,
+            "ENC_SID": 9,
+            "PLC_ID": 10,
+            "COMP": 11,
+            "COMP_S_ID": 12,
+            "CH_ID": 13,
+            "PLUGIN_ID": 14,
+            "DS_ID": 15,
+            "LUT_ID": 16,
+            "CONFIG": 17,
+            "LOCAL_CONFIG": 18,
+            "COMMAND": 19,
+            "MODULE": 20,
+            "VERSION": 21,
+            "RATE_MS": 22,
+            "OBJECTS": 90,
+            "PARENT_FILE": 91,
+            "SOURCE_LINE": 92,
+        }
+        return sorted(rows, key=lambda item: (priority.get(item[0], 50), item[0]))
+
+    def _param_row_tags(self, key: str) -> Tuple[str, ...]:
+        primary_keys = {
+            "FILE",
+            "HW_DESC",
+            "SLAVE_ID",
+            "AXIS_ID",
+            "AX_NAME",
+            "ENC_SID",
+            "PLC_ID",
+            "COMP",
+            "COMP_S_ID",
+            "CH_ID",
+            "PLUGIN_ID",
+            "DS_ID",
+            "LUT_ID",
+            "CONFIG",
+            "LOCAL_CONFIG",
+            "COMMAND",
+            "MODULE",
+            "VERSION",
+            "RATE_MS",
+        }
+        meta_keys = {"TYPE", "TITLE", "SOURCE", "PATH", "PARENT_FILE", "SOURCE_LINE", "OBJECTS"}
+        if key in primary_keys:
+            return ("param-primary",)
+        if key in meta_keys:
+            return ("param-meta",)
+        return ()
+
+    def _ordered_context_rows(self, rows: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+        def priority_for(key: str) -> Tuple[int, str]:
+            if key.startswith("Macro "):
+                return (20, key)
+            priority = {
+                "Selection": 0,
+                "Title": 1,
+                "Category": 2,
+                "Linked File": 3,
+                "Path": 4,
+                "File": 5,
+                "Source": 6,
+                "HW_DESC": 7,
+                "Slave ID": 8,
+                "Parent Slave": 9,
+                "Command": 10,
+                "Allowed Macros": 11,
+                "Missing Required": 12,
+                "Known Groups": 13,
+                "Supported Components": 14,
+                "EC_COMP_TYPE": 15,
+                "PVT Axes": 16,
+                "Objects": 90,
+                "Editor File": 91,
+                "Editor Type": 92,
+            }
+            return (priority.get(key, 50), key)
+
+        return sorted(rows, key=lambda item: priority_for(item[0]))
+
+    def _context_row_tags(self, key: str) -> Tuple[str, ...]:
+        primary_keys = {
+            "Selection",
+            "Title",
+            "Category",
+            "Linked File",
+            "Path",
+            "File",
+            "Source",
+            "HW_DESC",
+            "Slave ID",
+            "Parent Slave",
+            "Command",
+        }
+        support_keys = {
+            "Allowed Macros",
+            "Missing Required",
+            "Known Groups",
+            "Supported Components",
+            "EC_COMP_TYPE",
+            "PVT Axes",
+        }
+        meta_keys = {"Objects", "Editor File", "Editor Type"}
+        if key.startswith("Macro "):
+            return ("context-support",)
+        if key in primary_keys:
+            return ("context-primary",)
+        if key in support_keys:
+            return ("context-support",)
+        if key in meta_keys:
+            return ("context-meta",)
+        return ()
+
     def _populate_param_tree(self, rows: List[Tuple[str, str]]) -> None:
         self.param_tree.delete(*self.param_tree.get_children(""))
         if not rows:
             rows = [("Selection", "No object selected")]
-        for key, value in rows:
-            self.param_tree.insert("", "end", text=key, values=(value,))
+        for key, value in self._ordered_param_rows(rows):
+            self.param_tree.insert("", "end", text=key, values=(value,), tags=self._param_row_tags(key))
 
     def _populate_context_tree(self, rows: List[Tuple[str, str]]) -> None:
         if self.context_tree is None:
@@ -5381,8 +7348,553 @@ class ValidatorApp:
         self.context_tree.delete(*self.context_tree.get_children(""))
         if not rows:
             rows = [("Context", "Open a startup file or select an object")]
-        for key, value in rows:
-            self.context_tree.insert("", "end", text=key, values=(value,))
+        for key, value in self._ordered_context_rows(rows):
+            self.context_tree.insert("", "end", text=key, values=(value,), tags=self._context_row_tags(key))
+
+    def _populate_resolved_text(self, text: str) -> None:
+        if self.resolved_text is None:
+            return
+        self.resolved_text.configure(state=self.tk.NORMAL)
+        self.resolved_text.delete("1.0", "end")
+        self.resolved_text.insert("1.0", text)
+        self.resolved_text.configure(state=self.tk.DISABLED)
+
+    def _issues_for_entry(self, entry: Optional[Tuple[str, object]]) -> List[ValidationIssue]:
+        if entry is None or self.latest_result is None:
+            return []
+        entry_type, payload = entry
+        issues: List[ValidationIssue] = []
+        if entry_type == "file":
+            file_path = payload.path.resolve()
+            for issue in self.latest_result.issues:
+                if issue.source.resolve() == file_path:
+                    issues.append(issue)
+            return issues
+        if not isinstance(payload, StartupObject):
+            return issues
+
+        obj = payload
+        source_path = obj.source.resolve()
+        linked_path = obj.linked_file.resolve() if obj.linked_file is not None else None
+        for issue in self.latest_result.issues:
+            issue_source = issue.source.resolve()
+            if issue_source == source_path and issue.line == obj.line:
+                issues.append(issue)
+                continue
+            if linked_path is not None and issue_source == linked_path:
+                issues.append(issue)
+                continue
+            if issue_source == source_path and obj.kind in issue.message.lower():
+                issues.append(issue)
+        return issues
+
+    def _missing_required_command_macros(self, obj: StartupObject) -> List[str]:
+        script_name = self._module_script_name_for_object(obj)
+        if not script_name:
+            return []
+        macro_spec = self.inventory.module_macro_specs.get(script_name)
+        if macro_spec is None or not macro_spec.required:
+            return []
+        current_keys = set(self._current_object_macro_map(obj))
+        return sorted(key for key in macro_spec.required if key not in current_keys)
+
+    def _unresolved_linked_file_macros(self, obj: StartupObject) -> List[str]:
+        return sorted(key for key, value in obj.linked_file_details if str(value).strip() == "<unresolved>")
+
+    def _axis_group_names_for_source(self, source: Path) -> List[str]:
+        groups: Set[str] = set()
+        if self.latest_startup_tree is None:
+            return []
+        global_macros = self._startup_known_macro_map()
+        resolved_source = source.resolve()
+        for file_node in self.latest_startup_tree.files:
+            if file_node.path.resolve() != resolved_source:
+                continue
+            for obj in file_node.objects:
+                if obj.kind != "axis" or obj.linked_file is None:
+                    continue
+                yaml_text = _read_text_from_buffers(obj.linked_file, self.file_buffers)
+                if yaml_text is None:
+                    continue
+                macro_scope = dict(global_macros)
+                for key, value in obj.command_details:
+                    macro_scope[key] = value
+                for key, value in obj.linked_file_details:
+                    macro_scope[key] = value
+                expanded_yaml = _expand_text_macros(yaml_text, macro_scope)
+                for entry in _parse_simple_yaml_paths(expanded_yaml):
+                    if entry.path == "axis.group" and entry.value is not None:
+                        group_name = _normalize_value(entry.value)
+                        if group_name:
+                            groups.add(group_name)
+        return sorted(groups)
+
+    def _pvt_axis_titles_for_source(self, source: Path) -> List[str]:
+        titles: List[str] = []
+        if self.latest_startup_tree is None:
+            return titles
+        global_macros = self._startup_known_macro_map()
+        resolved_source = source.resolve()
+        for file_node in self.latest_startup_tree.files:
+            if file_node.path.resolve() != resolved_source:
+                continue
+            for obj in file_node.objects:
+                if obj.kind != "axis" or obj.linked_file is None:
+                    continue
+                yaml_text = _read_text_from_buffers(obj.linked_file, self.file_buffers)
+                if yaml_text is None:
+                    continue
+                macro_scope = dict(global_macros)
+                for key, value in obj.command_details:
+                    macro_scope[key] = value
+                for key, value in obj.linked_file_details:
+                    macro_scope[key] = value
+                expanded_yaml = _expand_text_macros(yaml_text, macro_scope)
+                parsed_entries = _parse_simple_yaml_paths(expanded_yaml)
+                has_pvt = any(
+                    entry.path in {"axis.pvt", "epics.motorRecord.pvt"}
+                    or entry.path.startswith("axis.pvt.")
+                    or entry.path.startswith("epics.motorRecord.pvt.")
+                    for entry in parsed_entries
+                )
+                if has_pvt:
+                    titles.append(obj.title)
+        return titles
+
+    def _axis_objects_for_source(self, source: Path) -> List[StartupObject]:
+        objects: List[StartupObject] = []
+        if self.latest_startup_tree is None:
+            return objects
+        resolved_source = source.resolve()
+        for file_node in self.latest_startup_tree.files:
+            if file_node.path.resolve() != resolved_source:
+                continue
+            for obj in file_node.objects:
+                if obj.kind == "axis":
+                    objects.append(obj)
+        return objects
+
+    def _find_axis_object_by_title(self, source: Path, title: str) -> Optional[StartupObject]:
+        normalized_title = str(title).strip()
+        if not normalized_title:
+            return None
+        for obj in self._axis_objects_for_source(source):
+            if obj.title == normalized_title:
+                return obj
+        return None
+
+    def _help_issue_action_for_entry(
+        self,
+        issue: ValidationIssue,
+        entry: Optional[Tuple[str, object]],
+    ) -> Optional[Tuple[str, str, object]]:
+        if entry is None or entry[0] == "file" or not isinstance(entry[1], StartupObject):
+            return None
+        obj = entry[1]
+        message = issue.message
+        same_object_issue = issue.source.resolve() == obj.source.resolve() and issue.line == obj.line
+
+        missing_macro_match = re.search(r"Missing required macro '([^']+)'", message)
+        if missing_macro_match and same_object_issue and self._selected_inline_macro_context() is not None:
+            return ("Add Macro", "add_macro", missing_macro_match.group(1))
+
+        if (
+            "Missing " in message and "reference:" in message
+        ) or "Missing hardware config" in message or "Missing linked file" in message:
+            if self._is_tree_entry_editable(entry):
+                preferred_field = ""
+                if "Missing file reference:" in message or "Missing linked file" in message:
+                    preferred_field = "FILE"
+                elif "Missing config reference:" in message or "Missing hardware config" in message:
+                    preferred_field = "CONFIG"
+                elif "Missing local_config reference:" in message:
+                    preferred_field = "LOCAL_CONFIG"
+                return ("Edit", "edit_field", (obj, preferred_field))
+
+        if ("MST_GRP_NAME" in message or "SLV_GRP_NAME" in message) and obj.kind == "master_slave_sm":
+            axis_objects = self._axis_objects_for_source(obj.source)
+            if axis_objects:
+                return ("Jump Axis", "jump_object", axis_objects[0])
+            if self._is_tree_entry_editable(entry):
+                preferred_field = "MST_GRP_NAME" if "MST_GRP_NAME" in message else "SLV_GRP_NAME"
+                return ("Edit", "edit_field", (obj, preferred_field))
+
+        if "Duplicate axis.id" in message or "Duplicate epics.name" in message:
+            if obj.kind == "axis":
+                match = re.search(r"for '([^']+)' and '([^']+)'", message)
+                if match:
+                    first_title, second_title = match.groups()
+                    other_title = first_title if second_title == obj.title else second_title
+                    other_axis = self._find_axis_object_by_title(obj.source, other_title)
+                    if other_axis is not None:
+                        return ("Jump Axis", "jump_object", other_axis)
+                if obj.linked_file is not None:
+                    return ("Open File", "open_linked", obj)
+
+        if obj.linked_file is not None and issue.source.resolve() == obj.linked_file.resolve():
+            return ("Open File", "open_linked", obj)
+
+        return None
+
+    def _help_suggestions_for_entry(self, entry: Optional[Tuple[str, object]]) -> List[Tuple[str, Optional[str]]]:
+        if entry is None:
+            return [("Select an object to see targeted suggestions.", None)]
+
+        entry_type, payload = entry
+        suggestions: List[Tuple[str, Optional[str]]] = []
+        if entry_type == "file":
+            suggestions.append(("Action: Validate the startup file", "validate"))
+            suggestions.append(("Use the tree flow order to review top-level execution from top to bottom.", None))
+            return suggestions
+        if not isinstance(payload, StartupObject):
+            suggestions.append(("Action: Open startup file", "open_linked"))
+            suggestions.append(("Use grouped view to scan by category, or switch back to Flow to inspect execution order.", None))
+            return suggestions
+
+        obj = payload
+        detail_map = self._object_detail_map(obj)
+        if obj.linked_file is not None:
+            suggestions.append(("Action: Open linked file", "open_linked"))
+            if not obj.linked_file.exists():
+                suggestions.append(("The linked file is missing. Fix the FILE path or create the file.", None))
+
+        if self._is_tree_entry_editable(entry):
+            suggestions.append(("Action: Open full edit", "edit"))
+
+        missing_required_macros = self._missing_required_command_macros(obj)
+        if missing_required_macros and self._selected_inline_macro_context() is not None:
+            suggestions.append(("Action: Add missing command macro", "add_macro"))
+        if self._selected_inline_macro_context() is not None and not missing_required_macros:
+            suggestions.append(("Action: Add macro", "add_macro"))
+
+        if self.startup_var.get().strip():
+            suggestions.append(("Action: Validate startup file", "validate"))
+
+        if missing_required_macros:
+            suggestions.append(("Required command macros still missing: {}".format(", ".join(missing_required_macros)), None))
+        unresolved_linked_macros = self._unresolved_linked_file_macros(obj)
+        if unresolved_linked_macros:
+            suggestions.append(("Linked-file macros still unresolved: {}".format(", ".join(unresolved_linked_macros)), None))
+        allowed_macros = self._available_command_macro_names(obj)
+        if allowed_macros:
+            preview = ", ".join(allowed_macros[:6])
+            if len(allowed_macros) > 6:
+                preview += ", ..."
+            suggestions.append(("Allowed command macros: {}".format(preview), None))
+
+        if obj.kind == "slave":
+            hw_desc = detail_map.get("HW_DESC", "").strip()
+            if hw_desc:
+                comp_hw_type = self.inventory.hardware_component_types.get(hw_desc, hw_desc)
+                support_map = self.inventory.component_support.get(comp_hw_type, {})
+                if support_map:
+                    suggestions.append(
+                        (
+                            "Supported components for {}: {}".format(
+                                hw_desc,
+                                ", ".join(sorted(support_map.keys())[:6]),
+                            ),
+                            None,
+                        )
+                    )
+        elif obj.kind == "axis":
+            if detail_map.get("DRV_SID"):
+                suggestions.append(("Use Resolved view to verify DRV_SID/ENC_SID macros before saving.", None))
+            if obj.linked_file is not None:
+                suggestions.append(("Axis YAML can be reused. Check AX_NAME and AXIS_ID to avoid duplicates.", None))
+        elif obj.kind == "slave_config":
+            suggestions.append(("Slave config normally belongs directly under the slave it configures.", None))
+            if detail_map.get("HW_DESC"):
+                config_values = self._available_hardware_config_values(detail_map.get("HW_DESC", ""))
+                if config_values:
+                    preview = ", ".join(config_values[:6])
+                    if len(config_values) > 6:
+                        preview += ", ..."
+                    suggestions.append(("Known config suffixes for {}: {}".format(detail_map.get("HW_DESC", ""), preview), None))
+        elif obj.kind == "configured_axis":
+            suggestions.append(("Open the linked axis config file to inspect the parameters applied before addAxis.cmd.", None))
+            if detail_map.get("CFG_MACROS"):
+                suggestions.append(("Check CFG_MACROS carefully. Invalid payloads are validated but not auto-corrected.", None))
+        elif obj.kind == "apply_config":
+            suggestions.append(("Run validation after applyConfig placement to confirm bus objects are in the intended order.", None))
+            suggestions.append(("applyConfig should normally come after slave and axis setup, before app mode.", None))
+        elif obj.kind == "master_slave_sm":
+            known_groups = self._axis_group_names_for_source(obj.source)
+            if known_groups:
+                suggestions.append(("Known axis groups in this startup file: {}".format(", ".join(known_groups[:8])), None))
+            suggestions.append(("Check master and slave group names against the configured axis groups before saving.", None))
+        elif obj.kind == "subst_config":
+            suggestions.append(("Use the linked substitution file to review generated axes and macros before execution.", None))
+            if detail_map.get("MACROS"):
+                suggestions.append(("Validate the substitution macro payload after edits to catch malformed segments.", None))
+        elif obj.kind == "pvt_controller":
+            pvt_axes = self._pvt_axis_titles_for_source(obj.source)
+            if pvt_axes:
+                preview = ", ".join(pvt_axes[:4])
+                if len(pvt_axes) > 4:
+                    preview += ", ..."
+                suggestions.append(("Axes with PVT support in this startup file: {}".format(preview), None))
+            suggestions.append(("Use a valid EtherCAT trigger entry if hardware triggering is enabled.", None))
+            if not detail_map.get("TRG_EC_ENTRY"):
+                suggestions.append(("Without TRG_EC_ENTRY the controller relies on software triggering only.", None))
+        elif obj.kind == "lut":
+            suggestions.append(("Open the linked LUT file to verify the curve data and LUT_ID.", None))
+            suggestions.append(("Keep LUT_ID stable if PLCs or other objects refer to this lookup table later.", None))
+        elif obj.kind == "encoder":
+            suggestions.append(("Verify encoder slave and channel macros against the linked YAML.", None))
+        elif obj.kind == "component":
+            suggestions.append(("Validate after edits to confirm component support for the selected slave.", None))
+        elif obj.kind == "ecmc_command":
+            suggestions.append(("Open full edit to use parsed ECMC syntax help and parameter guidance.", None))
+        elif obj.kind in {"plc", "plcvar_analog", "plcvar_binary"}:
+            suggestions.append(("Use EC Help in the editor to pick valid EtherCAT entries in PLC content.", None))
+
+        issues = self._issues_for_entry(entry)
+        if issues:
+            suggestions.insert(0, ("This selection has {} validation issue(s). Double-click a problem above to jump.".format(len(issues)), None))
+        if not suggestions:
+            suggestions.append(("No specific suggestions for this selection.", None))
+        return suggestions
+
+    def _suggestions_for_entry(self, entry: Optional[Tuple[str, object]]) -> List[str]:
+        return [text for text, _action in self._help_suggestions_for_entry(entry)]
+
+    def _populate_help_panel(self, entry: Optional[Tuple[str, object]] = None) -> None:
+        if entry is None:
+            entry = self._selected_startup_entry()
+        self._update_help_header(entry)
+        if self.help_issue_tree is not None:
+            self.help_issue_item_map.clear()
+            self.help_issue_action_map.clear()
+            self.help_issue_tree.delete(*self.help_issue_tree.get_children(""))
+            issues = self._issues_for_entry(entry)
+            if not issues:
+                item_id = self.help_issue_tree.insert("", "end", values=("INFO", "No problems for current selection", ""))
+                self.help_issue_item_map[item_id] = ValidationIssue(
+                    severity="info",
+                    source=self.current_edit_path or Path("."),
+                    line=1,
+                    message="No problems for current selection",
+                )
+            else:
+                for issue in issues:
+                    action_info = self._help_issue_action_for_entry(issue, entry)
+                    action_label = action_info[0] if action_info is not None else ""
+                    item_id = self.help_issue_tree.insert(
+                        "",
+                        "end",
+                        values=(issue.severity.upper(), issue.message, action_label),
+                    )
+                    self.help_issue_item_map[item_id] = issue
+                    if action_info is not None:
+                        self.help_issue_action_map[item_id] = (action_info[1], action_info[2])
+        if self.help_suggestion_list is not None:
+            self.help_suggestion_list.delete(0, self.tk.END)
+            self.help_suggestion_actions = []
+            for item, action in self._help_suggestions_for_entry(entry):
+                self.help_suggestion_list.insert(self.tk.END, item)
+                self.help_suggestion_actions.append(action)
+
+    def _open_selected_help_issue(self, _event=None) -> str:
+        if self.help_issue_tree is None:
+            return "break"
+        selected = self.help_issue_tree.selection()
+        if not selected:
+            return "break"
+        item_id = selected[0]
+        action_info = self.help_issue_action_map.get(item_id)
+        if action_info is not None:
+            action_name, payload = action_info
+            if action_name == "add_macro":
+                self._add_inline_macro(preferred_name=str(payload))
+                return "break"
+            if action_name == "edit":
+                self._edit_selected_object()
+                return "break"
+            if action_name == "edit_field" and isinstance(payload, tuple) and len(payload) == 2:
+                obj, preferred_field = payload
+                if isinstance(obj, StartupObject):
+                    target_item = self.object_tree_items.get(self._object_tree_key(obj))
+                    if target_item is not None:
+                        self.startup_tree.selection_set(target_item)
+                        self.startup_tree.focus(target_item)
+                        self.startup_tree.see(target_item)
+                    self._edit_selected_object(preferred_field=preferred_field)
+                return "break"
+            if action_name == "open_linked":
+                self._open_selected_object_file()
+                return "break"
+            if action_name == "jump_object" and isinstance(payload, StartupObject):
+                target_item = self.object_tree_items.get(self._object_tree_key(payload))
+                if target_item is not None:
+                    self.startup_tree.selection_set(target_item)
+                    self.startup_tree.focus(target_item)
+                    self.startup_tree.see(target_item)
+                    self._on_startup_tree_selected()
+                return "break"
+        issue = self.help_issue_item_map.get(item_id)
+        if issue is None or issue.severity == "info":
+            return "break"
+        self._open_file_in_editor(issue.source, line=issue.line)
+        return "break"
+
+    def _run_selected_help_suggestion(self, _event=None) -> str:
+        if self.help_suggestion_list is None:
+            return "break"
+        selection = self.help_suggestion_list.curselection()
+        if not selection:
+            return "break"
+        index = int(selection[0])
+        if index < 0 or index >= len(self.help_suggestion_actions):
+            return "break"
+        action = self.help_suggestion_actions[index]
+        if action == "open_linked":
+            self._open_selected_object_file()
+        elif action == "edit":
+            self._edit_selected_object()
+        elif action == "add_macro":
+            self._add_inline_macro()
+        elif action == "validate":
+            self._validate_current_project()
+        return "break"
+
+    def _quick_edit_fields_for_entry(self, entry: Optional[Tuple[str, object]]) -> Tuple[Optional[StartupObject], List[str]]:
+        if entry is None or entry[0] == "file" or not isinstance(entry[1], StartupObject):
+            return None, []
+        obj = entry[1]
+        editable_map = self._object_detail_map(obj)
+        protected = {"TYPE", "TITLE", "SOURCE"}
+        ordered_fields: List[str] = []
+        if obj.linked_file is not None and "FILE" in editable_map:
+            ordered_fields.append("FILE")
+        for key, _value in obj.details:
+            if key in editable_map and key not in protected and key not in ordered_fields:
+                ordered_fields.append(key)
+        for key, _value in obj.command_details:
+            if key in editable_map and key not in protected and key not in ordered_fields:
+                ordered_fields.append(key)
+        for key, _value in obj.linked_file_details:
+            if key in editable_map and key not in protected and key not in ordered_fields:
+                ordered_fields.append(key)
+        for key in sorted(editable_map):
+            if key not in protected and key not in ordered_fields:
+                ordered_fields.append(key)
+        return obj, ordered_fields
+
+    def _refresh_quick_edit_panel(self, entry: Optional[Tuple[str, object]] = None, selected_key: str = "") -> None:
+        if entry is None:
+            entry = self._selected_startup_entry()
+        obj, fields = self._quick_edit_fields_for_entry(entry)
+        self.quick_edit_fields = fields
+        if self.quick_edit_frame is not None:
+            if obj is not None and fields:
+                if not self.quick_edit_frame.winfo_manager():
+                    self.quick_edit_frame.pack(side=self.tk.BOTTOM, fill=self.tk.X, pady=(6, 0))
+            elif self.quick_edit_frame.winfo_manager():
+                self.quick_edit_frame.pack_forget()
+        if self.quick_edit_key_combo is not None:
+            self.quick_edit_key_combo.configure(values=fields)
+        state = "normal" if obj is not None and bool(fields) else "disabled"
+        if self.quick_edit_key_combo is not None:
+            self.quick_edit_key_combo.configure(state="readonly" if state == "normal" else "disabled")
+        if self.quick_edit_value_entry is not None:
+            self.quick_edit_value_entry.configure(state=state)
+        if self.quick_edit_apply_button is not None:
+            self.quick_edit_apply_button.configure(state=state)
+        if self.quick_edit_open_button is not None:
+            self.quick_edit_open_button.configure(state=state)
+
+        if obj is None or not fields:
+            self.quick_edit_key_var.set("")
+            self.quick_edit_value_var.set("")
+            self.quick_edit_hint_var.set("")
+            return
+
+        current_key = selected_key if selected_key in fields else self.quick_edit_key_var.get().strip()
+        if current_key not in fields:
+            current_key = fields[0]
+        editable_map = self._object_detail_map(obj)
+        self.quick_edit_key_var.set(current_key)
+        self.quick_edit_value_var.set(str(editable_map.get(current_key, "")))
+        self.quick_edit_hint_var.set("Updates the selected object directly.")
+
+    def _refresh_resolved_preview(self) -> None:
+        if self.current_edit_path is not None:
+            current_path = self.current_edit_path.resolve()
+            if current_path in self.file_buffers:
+                source_text = self.file_buffers[current_path]
+            elif current_path.exists():
+                source_text = _read_text(current_path)
+            else:
+                source_text = ""
+            macro_map = self._editor_known_macro_map()
+            expanded = _expand_text_macros(source_text, macro_map) if source_text else ""
+            header = ["# Resolved view", "# File: {}".format(self._relative_display(current_path))]
+            if macro_map:
+                header.append(
+                    "# Macros: {}".format(
+                        ", ".join("{}={}".format(key, macro_map[key]) for key in sorted(macro_map))
+                    )
+                )
+            self._populate_resolved_text("\n".join(header + ["", expanded]))
+            return
+
+        entry = self._selected_startup_entry()
+        if entry is None or entry[0] == "file" or not isinstance(entry[1], StartupObject):
+            self._populate_resolved_text("Open a file or select an object to see resolved values.")
+            return
+        obj = entry[1]
+        macro_map = self._current_object_macro_map(obj)
+        source_line = ""
+        try:
+            content = self.file_buffers.get(obj.source.resolve(), _read_text(obj.source))
+            lines = content.splitlines()
+            if 0 < obj.line <= len(lines):
+                source_line = lines[obj.line - 1]
+        except Exception:
+            source_line = ""
+        resolved_line = _expand_text_macros(source_line, macro_map) if source_line else ""
+        self._populate_resolved_text(
+            "# Resolved object\n# {}\n\n{}\n".format(obj.title, resolved_line or "No resolved content available.")
+        )
+
+    def _on_param_tree_selected(self, _event=None) -> None:
+        selected = self.param_tree.selection()
+        if not selected:
+            self._refresh_quick_edit_panel()
+            return
+        item_id = selected[0]
+        key = self.param_tree.item(item_id, "text")
+        self._refresh_quick_edit_panel(selected_key=key)
+
+    def _on_quick_edit_field_changed(self, _event=None) -> None:
+        entry = self._selected_startup_entry()
+        obj, fields = self._quick_edit_fields_for_entry(entry)
+        if obj is None or not fields:
+            return
+        key = self.quick_edit_key_var.get().strip()
+        if key not in fields:
+            return
+        editable_map = self._object_detail_map(obj)
+        self.quick_edit_value_var.set(str(editable_map.get(key, "")))
+
+    def _apply_quick_edit(self, _event=None) -> str:
+        from tkinter import messagebox
+
+        entry = self._selected_startup_entry()
+        obj, fields = self._quick_edit_fields_for_entry(entry)
+        if obj is None or not fields:
+            return "break"
+        key = self.quick_edit_key_var.get().strip()
+        if key not in fields:
+            messagebox.showinfo("Select field", "Choose a field to update first.")
+            return "break"
+        editable_map = self._object_detail_map(obj)
+        updated_values = dict(editable_map)
+        updated_values[key] = self.quick_edit_value_var.get()
+        if self._apply_direct_object_update(obj, updated_values):
+            self._refresh_quick_edit_panel(selected_key=key)
+        return "break"
 
     def _update_object_action_buttons(self, entry: Optional[Tuple[str, object]] = None) -> None:
         if entry is None:
@@ -5395,6 +7907,7 @@ class ValidatorApp:
         delete_state = "disabled"
         move_up_state = "disabled"
         move_down_state = "disabled"
+        hint = "Select an object to edit, open a linked file, or add a macro."
         if entry is not None:
             entry_type, payload = entry
             if self._is_tree_entry_editable(entry):
@@ -5410,12 +7923,38 @@ class ValidatorApp:
                 paste_state = "normal"
             if self._selected_inline_macro_context() is not None:
                 macro_state = "normal"
+            if entry_type == "file":
+                hint = "Open the file, filter the tree, or paste copied objects into this startup file."
+            elif entry_type == "object":
+                actions: List[str] = []
+                if editable_state == "normal":
+                    actions.append("Edit")
+                if open_state == "normal":
+                    actions.append("Open linked file")
+                if macro_state == "normal":
+                    actions.append("Add macro")
+                if copy_state == "normal":
+                    actions.append("Copy")
+                if delete_state == "normal":
+                    actions.append("Remove")
+                if move_up_state == "normal" or move_down_state == "normal":
+                    actions.append("Move")
+                if actions:
+                    hint = "Actions: {}.".format(" • ".join(actions))
+            elif entry_type in {"linked-file", "linked-detail", "linked-detail-group"}:
+                hint = "Open the linked file or inspect macros applied to it."
+            elif entry_type == "category-group":
+                hint = "Use this group to scan related objects quickly."
         if self.edit_object_button is not None:
             self.edit_object_button.configure(state=editable_state)
         if self.add_macro_button is not None:
             self.add_macro_button.configure(state=macro_state)
         if self.open_object_file_button is not None:
             self.open_object_file_button.configure(state=open_state)
+        if self.context_open_button is not None:
+            self.context_open_button.configure(state=open_state)
+        if self.help_open_button is not None:
+            self.help_open_button.configure(state=open_state)
         if self.copy_object_button is not None:
             self.copy_object_button.configure(state=copy_state)
         if self.paste_object_button is not None:
@@ -5426,6 +7965,17 @@ class ValidatorApp:
             self.move_up_button.configure(state=move_up_state)
         if self.move_down_button is not None:
             self.move_down_button.configure(state=move_down_state)
+        if self.context_edit_button is not None:
+            self.context_edit_button.configure(state=editable_state)
+        if self.help_edit_button is not None:
+            self.help_edit_button.configure(state=editable_state)
+        if self.context_macro_button is not None:
+            self.context_macro_button.configure(state=macro_state)
+        if self.help_macro_button is not None:
+            self.help_macro_button.configure(state=macro_state)
+        if self.help_validate_button is not None:
+            self.help_validate_button.configure(state="normal" if self.latest_startup_tree is not None else "disabled")
+        self.object_action_hint_var.set(hint)
 
     def _can_open_tree_entry_file(self, entry: Optional[Tuple[str, object]]) -> bool:
         return self._tree_entry_open_target(entry) is not None
@@ -5438,6 +7988,11 @@ class ValidatorApp:
         entry_type, payload = entry
         if entry_type == "file":
             return (payload.path, payload.parent_line, None)
+        if entry_type == "category-group":
+            file_path, _category, _count = payload
+            return (file_path, None, None)
+        if not isinstance(payload, StartupObject):
+            return None
         obj = payload
         if entry_type in {"linked-file", "linked-detail", "linked-detail-group"}:
             if obj.linked_file is None:
@@ -5460,7 +8015,7 @@ class ValidatorApp:
             selected = self.startup_tree.selection()
             if not selected:
                 return False
-            key = self.startup_tree.item(selected[0], "text")
+            key = self._tree_text_logical_name(self.startup_tree.item(selected[0], "text"))
             return key in editable_map
         return False
 
@@ -5477,6 +8032,13 @@ class ValidatorApp:
             rows.append(("Selection", "file"))
             rows.append(("Path", self._relative_display(file_node.path)))
             rows.append(("Objects", str(len(file_node.objects))))
+            return rows
+        if entry_type == "category-group":
+            file_path, category, count = payload
+            rows.append(("Selection", "group"))
+            rows.append(("Category", category))
+            rows.append(("File", self._relative_display(file_path)))
+            rows.append(("Objects", str(count)))
             return rows
 
         obj = payload
@@ -5509,11 +8071,14 @@ class ValidatorApp:
                 rows.append(("Macro {}".format(key), str(macro_map[key])))
 
         allowed_macros = self._available_command_macro_names(obj)
+        missing_required_macros = self._missing_required_command_macros(obj)
         script_name = self._module_script_name_for_object(obj)
         if script_name:
             rows.append(("Command", script_name))
         if allowed_macros:
             rows.append(("Allowed Macros", ", ".join(allowed_macros)))
+        if missing_required_macros:
+            rows.append(("Missing Required", ", ".join(missing_required_macros)))
 
         if obj.kind in {"slave", "component"}:
             comp_hw_type = self.inventory.hardware_component_types.get(hw_desc, hw_desc) if hw_desc else ""
@@ -5522,6 +8087,14 @@ class ValidatorApp:
                 support_map = self.inventory.component_support.get(comp_hw_type, {})
                 if support_map:
                     rows.append(("Supported Components", ", ".join(sorted(support_map.keys()))))
+        elif obj.kind == "master_slave_sm":
+            known_groups = self._axis_group_names_for_source(obj.source)
+            if known_groups:
+                rows.append(("Known Groups", ", ".join(known_groups)))
+        elif obj.kind == "pvt_controller":
+            pvt_axes = self._pvt_axis_titles_for_source(obj.source)
+            if pvt_axes:
+                rows.append(("PVT Axes", ", ".join(pvt_axes)))
 
         return rows
 
@@ -5529,6 +8102,8 @@ class ValidatorApp:
         if entry is None:
             entry = self._selected_startup_entry()
         if entry is None:
+            self.selection_header_var.set("No object selected")
+            self._update_selection_badges(None)
             rows: List[Tuple[str, str]] = []
             if self.current_edit_path is not None:
                 rows.append(("Editor File", self._relative_display(self.current_edit_path)))
@@ -5542,9 +8117,15 @@ class ValidatorApp:
                         rows.append(("Macro {}".format(key), str(value)))
             self._populate_context_tree(rows)
             self._update_object_action_buttons(None)
+            self._refresh_quick_edit_panel(None)
+            self._refresh_resolved_preview()
+            self._populate_help_panel(None)
             return
         self._populate_context_tree(self._context_rows_for_entry(*entry))
         self._update_object_action_buttons(entry)
+        self._refresh_quick_edit_panel(entry)
+        self._refresh_resolved_preview()
+        self._populate_help_panel(entry)
 
     def _open_selected_object_file(self) -> None:
         entry = self._selected_startup_entry()
@@ -5553,6 +8134,51 @@ class ValidatorApp:
             return
         path, line, linked_object_key = target
         self._open_file_in_editor(path, line=line, linked_object_key=linked_object_key)
+
+    def _show_existing_editor_location(
+        self,
+        path: Path,
+        line: Optional[int] = None,
+        linked_object_key: Optional[Tuple[Path, int, str, str]] = None,
+    ) -> bool:
+        resolved = path.resolve()
+        if self.current_edit_path != resolved:
+            return False
+        self.current_edit_linked_object_key = linked_object_key
+        self.editor_file_var.set(str(resolved))
+        if line is not None and line > 0:
+            self._highlight_editor_line(line)
+            self._highlight_tree_target_line(line)
+        return True
+
+    def _show_tree_entry_in_editor(self, entry: Optional[Tuple[str, object]]) -> None:
+        if entry is None:
+            return
+        entry_type, payload = entry
+        if entry_type == "file":
+            if self._show_existing_editor_location(payload.path, line=payload.parent_line):
+                return
+            self._open_file_in_editor(payload.path, line=payload.parent_line)
+            return
+        if entry_type == "category-group":
+            file_path, _category, _count = payload
+            if self._show_existing_editor_location(file_path):
+                return
+            self._open_file_in_editor(file_path)
+            return
+        obj = payload
+        if entry_type in {"linked-file", "linked-detail", "linked-detail-group"}:
+            if obj.linked_file is not None and obj.linked_file.exists():
+                if self._show_existing_editor_location(
+                    obj.linked_file,
+                    linked_object_key=self._object_tree_key(obj),
+                ):
+                    return
+                self._open_file_in_editor(obj.linked_file, linked_object_key=self._object_tree_key(obj))
+            return
+        if self._show_existing_editor_location(obj.source, line=obj.line):
+            return
+        self._open_file_in_editor(obj.source, line=obj.line)
 
     def _file_browser_root_for_startup(self, startup_path: Path) -> Path:
         return startup_path.resolve().parent
@@ -5773,6 +8399,8 @@ class ValidatorApp:
         entry_type, payload = entry
         if entry_type == "file":
             return "file"
+        if not isinstance(payload, StartupObject):
+            return entry_type
         return payload.kind
 
     def _editable_object_kinds(self) -> Set[str]:
@@ -5781,7 +8409,10 @@ class ValidatorApp:
             "master",
             "macro",
             "slave",
+            "slave_config",
+            "apply_config",
             "axis",
+            "configured_axis",
             "encoder",
             "plc",
             "component",
@@ -5789,6 +8420,10 @@ class ValidatorApp:
             "datastorage",
             "ecsdo",
             "ecdataitem",
+            "master_slave_sm",
+            "subst_config",
+            "pvt_controller",
+            "lut",
             "plcvar_analog",
             "plcvar_binary",
             "ecmc_command",
@@ -5800,7 +8435,10 @@ class ValidatorApp:
         mapping = {
             "master": "addMaster.cmd",
             "slave": "addSlave.cmd",
+            "slave_config": "applySlaveConfig.cmd",
+            "apply_config": "applyConfig.cmd",
             "axis": "loadYamlAxis.cmd",
+            "configured_axis": "configureAxis.cmd",
             "encoder": "loadYamlEnc.cmd",
             "plc": "loadPLCFile.cmd",
             "plugin": "loadPlugin.cmd",
@@ -5808,6 +8446,10 @@ class ValidatorApp:
             "component": "applyComponent.cmd",
             "ecsdo": "addEcSdoRT.cmd",
             "ecdataitem": "addEcDataItem.cmd",
+            "master_slave_sm": "addMasterSlaveSM.cmd",
+            "subst_config": "loadSubstConfig.cmd",
+            "pvt_controller": "pvtControllerConfig.cmd",
+            "lut": "loadLUTFile.cmd",
             "record_update_rate": "setRecordUpdateRate.cmd",
             "restore_record_update_rate": "restoreRecordUpdateRate.cmd",
         }
@@ -5865,7 +8507,12 @@ class ValidatorApp:
         current_keys = set(self._current_object_macro_map(obj).keys())
         return sorted(key for key in macro_spec.allowed if key not in current_keys)
 
-    def _prompt_inline_macro(self, obj: StartupObject, scope: str) -> Optional[Tuple[str, str]]:
+    def _prompt_inline_macro(
+        self,
+        obj: StartupObject,
+        scope: str,
+        preferred_name: str = "",
+    ) -> Optional[Tuple[str, str]]:
         from tkinter import messagebox
 
         tk = self.tk
@@ -5887,7 +8534,11 @@ class ValidatorApp:
         dialog.transient(self.root)
         dialog.withdraw()
 
-        name_var = tk.StringVar(value=available_names[0] if available_names else "")
+        initial_name = preferred_name.strip().upper()
+        if available_names:
+            if initial_name not in available_names:
+                initial_name = available_names[0]
+        name_var = tk.StringVar(value=initial_name if initial_name else (available_names[0] if available_names else ""))
         value_var = tk.StringVar(value="")
         result: Dict[str, Optional[Tuple[str, str]]] = {"macro": None}
         next_row = 0
@@ -6009,7 +8660,7 @@ class ValidatorApp:
         newline = "\n" if raw_line.endswith("\n") else ""
         return '{}{} {}, "{}"{}'.format(leading_ws, command_name, command_target, payload, newline)
 
-    def _add_inline_macro(self) -> None:
+    def _add_inline_macro(self, preferred_name: str = "") -> None:
         from tkinter import messagebox
 
         context = self._selected_inline_macro_context()
@@ -6018,7 +8669,7 @@ class ValidatorApp:
             return
 
         scope, obj = context
-        macro = self._prompt_inline_macro(obj, scope)
+        macro = self._prompt_inline_macro(obj, scope, preferred_name=preferred_name)
         if macro is None:
             return
 
@@ -6071,8 +8722,15 @@ class ValidatorApp:
 
         root_insert_items = [
             ("Slave", "slave", None),
+            ("Slave Config", "slave_config", None),
+            ("Apply Config", "apply_config", None),
             ("Axis", "axis", None),
+            ("Configure Axis", "configured_axis", None),
             ("Macro", "macro", None),
+            ("Master/Slave SM", "master_slave_sm", None),
+            ("Subst Config", "subst_config", None),
+            ("PVT Controller", "pvt_controller", None),
+            ("LUT", "lut", None),
             ("Set Record Rate", "record_update_rate", None),
             ("Restore Record Rate", "restore_record_update_rate", None),
             ("ECMC Command", "ecmc_command", None),
@@ -6084,8 +8742,15 @@ class ValidatorApp:
         ]
         file_insert_items = [
             ("Add Slave", "slave", False),
+            ("Add Slave Config", "slave_config", False),
+            ("Apply Config", "apply_config", False),
             ("Add Axis", "axis", False),
+            ("Configure Axis", "configured_axis", False),
             ("Add Macro", "macro", False),
+            ("Add Master/Slave SM", "master_slave_sm", False),
+            ("Add Subst Config", "subst_config", False),
+            ("Add PVT Controller", "pvt_controller", False),
+            ("Add LUT", "lut", False),
             ("Set Record Rate", "record_update_rate", False),
             ("Restore Record Rate", "restore_record_update_rate", False),
             ("Add ECMC Command", "ecmc_command", False),
@@ -6120,6 +8785,7 @@ class ValidatorApp:
         if selected_kind in {"slave", "axis", "plc"}:
             child_menu = self.tk.Menu(self.startup_menu, tearoff=0)
             if selected_kind == "slave":
+                self._add_startup_menu_item(child_menu, "Add Slave Config", "slave_config")
                 self._add_startup_menu_item(child_menu, "Add Component", "component")
             elif selected_kind == "axis":
                 self._add_startup_menu_item(child_menu, "Add Encoder", "encoder")
@@ -6196,6 +8862,21 @@ class ValidatorApp:
             if not exclude:
                 allowed.append(hw_desc)
         return sorted(set(allowed))
+
+    def _available_hardware_config_values(self, hw_desc: str) -> List[str]:
+        hw_desc = str(hw_desc or "").strip()
+        if not hw_desc:
+            return []
+        prefix = "ecmc{}".format(hw_desc)
+        values: List[str] = []
+        for file_name in sorted(self.inventory.hardware_configs):
+            stem = Path(file_name).stem
+            if not stem.startswith(prefix):
+                continue
+            suffix = stem[len(prefix) :]
+            if suffix:
+                values.append(suffix)
+        return sorted(set(values))
 
     def _available_ecmc_command_syntaxes(self) -> List[str]:
         syntaxes: List[str] = []
@@ -6465,7 +9146,7 @@ class ValidatorApp:
                     return obj
         return None
 
-    def _context_slave_for_component_dialog(self) -> Optional[StartupObject]:
+    def _context_slave_for_selected_entry(self) -> Optional[StartupObject]:
         entry = self._selected_startup_entry()
         if entry is None:
             return None
@@ -6474,9 +9155,20 @@ class ValidatorApp:
             return None
         if payload.kind == "slave":
             return payload
-        if payload.kind == "component":
+        if payload.parent_slave_id is not None:
             return self._find_slave_object(payload.source, payload.parent_slave_id)
         return None
+
+    def _context_slave_for_component_dialog(self) -> Optional[StartupObject]:
+        entry = self._selected_startup_entry()
+        if entry is None:
+            return None
+        entry_type, payload = entry
+        if entry_type == "file" or not isinstance(payload, StartupObject):
+            return None
+        if payload.kind == "component":
+            return self._find_slave_object(payload.source, payload.parent_slave_id)
+        return self._context_slave_for_selected_entry()
 
     def _component_dialog_context(self, initial_values: Dict[str, str]) -> Dict[str, object]:
         slave_obj = self._context_slave_for_component_dialog()
@@ -6982,10 +9674,95 @@ class ValidatorApp:
         self.root.wait_window(dialog)
         return result["command"]
 
-    def _apply_object_update(self, obj: StartupObject, values: Dict[str, str]) -> bool:
+    def _ordered_value_items_for_object(self, obj: StartupObject, values: Dict[str, str]) -> List[Tuple[str, str]]:
+        ordered_keys: List[str] = []
+        if obj.linked_file is not None and "FILE" in values:
+            ordered_keys.append("FILE")
+        for key, _value in obj.details:
+            if key in values and key not in ordered_keys:
+                ordered_keys.append(key)
+        for key, _value in obj.command_details:
+            if key in values and key not in ordered_keys:
+                ordered_keys.append(key)
+        for key, _value in obj.linked_file_details:
+            if key in values and key not in ordered_keys:
+                ordered_keys.append(key)
+        for key in values:
+            if key not in ordered_keys:
+                ordered_keys.append(key)
+        return [(key, str(values.get(key, ""))) for key in ordered_keys]
+
+    def _build_object_command_from_values(self, obj: StartupObject, values: Dict[str, str]) -> Optional[str]:
+        kind = obj.kind
+        ordered_items = self._ordered_value_items_for_object(obj, values)
+        item_map = {key: value for key, value in ordered_items}
+
+        if kind == "macro":
+            return "epicsEnvSet({}, {})\n".format(item_map.get("NAME", "").strip(), item_map.get("VALUE", "").strip())
+        if kind == "require":
+            module_name = item_map.get("MODULE", "").strip()
+            version = item_map.get("VERSION", "").strip()
+            macro_pairs: List[Tuple[str, str]] = []
+            for key, value in ordered_items:
+                if key in {"MODULE", "VERSION"}:
+                    continue
+                if key == "ECMC_VER" and version:
+                    continue
+                macro_pairs.append((key, value))
+            payload = ", ".join(
+                "{}={}".format(key, _quote_startup_value(value))
+                for key, value in macro_pairs
+                if str(key).strip() and str(value).strip()
+            )
+            version_part = " {}".format(version) if version else ""
+            payload_part = ' "{}"'.format(payload) if payload else ""
+            return "require {}{}{}\n".format(module_name, version_part, payload_part)
+        if kind == "ecmc_command":
+            wrapper_name = item_map.get("WRAPPER", "ecmcConfigOrDie").strip() or "ecmcConfigOrDie"
+            command_text = _normalize_ecmc_command_text(item_map.get("COMMAND", "").strip())
+            return '{} "{}"\n'.format(wrapper_name, command_text.replace('"', '\\"'))
+        if kind == "restore_record_update_rate":
+            return "${SCRIPTEXEC} ${ecmccfg_DIR}restoreRecordUpdateRate.cmd\n"
+        if kind in {"plcvar_analog", "plcvar_binary"}:
+            script_name = "ecmcPlcAnalog.db" if kind == "plcvar_analog" else "ecmcPlcBinary.db"
+            payload = ", ".join(
+                "{}={}".format(key, _quote_startup_value(value))
+                for key, value in ordered_items
+                if str(value).strip()
+            )
+            return 'dbLoadRecords("{}", "{}")\n'.format(script_name, payload)
+
+        script_name = self._module_script_name_for_object(obj)
+        if not script_name:
+            return None
+        render_items = [(key, value) for key, value in ordered_items if key != "FILE" or str(value).strip()]
+        return _render_startup_command(script_name, render_items)
+
+    def _apply_direct_object_update(self, obj: StartupObject, values: Dict[str, str]) -> bool:
         from tkinter import messagebox
 
-        new_line = self._prompt_for_object_values(obj.kind, initial_values=values, mode="edit")
+        new_line = self._build_object_command_from_values(obj, values)
+        if not new_line:
+            messagebox.showinfo("Unsupported update", "Direct editing is not available for this object.")
+            return False
+        try:
+            self._rewrite_object_line(obj, new_line)
+        except Exception as exc:
+            messagebox.showerror("Update failed", str(exc))
+            return False
+        self.status_var.set("Updated {} in {}".format(obj.kind, obj.source.name))
+        self._refresh_startup_tree()
+        return True
+
+    def _apply_object_update(self, obj: StartupObject, values: Dict[str, str], preferred_field: str = "") -> bool:
+        from tkinter import messagebox
+
+        new_line = self._prompt_for_object_values(
+            obj.kind,
+            initial_values=values,
+            mode="edit",
+            preferred_field=preferred_field,
+        )
         if not new_line:
             return False
         try:
@@ -7002,6 +9779,7 @@ class ValidatorApp:
         kind: str,
         initial_values: Optional[Dict[str, str]] = None,
         mode: str = "add",
+        preferred_field: str = "",
     ) -> Optional[str]:
         tk = self.tk
         ttk = self.ttk
@@ -7023,6 +9801,35 @@ class ValidatorApp:
                 ("MACROS", "MACROS", initial_values.get("MACROS", ""), "entry", None),
             ]
             script_name = "addSlave.cmd"
+        elif kind == "slave_config":
+            slave_obj = self._context_slave_for_selected_entry()
+            default_hw_desc = initial_values.get("HW_DESC", "")
+            default_slave_id = initial_values.get("SLAVE_ID", "")
+            if slave_obj is not None:
+                slave_detail_map = dict(slave_obj.details)
+                if not default_hw_desc:
+                    default_hw_desc = slave_detail_map.get("HW_DESC", "")
+                if not default_slave_id and slave_obj.slave_id is not None:
+                    default_slave_id = str(slave_obj.slave_id)
+            hw_desc_values = self._available_slave_hw_descs()
+            config_values = self._available_hardware_config_values(default_hw_desc)
+            fields = [
+                ("CONFIG", "CONFIG", initial_values.get("CONFIG", ""), "combo", config_values),
+                (
+                    "LOCAL_CONFIG",
+                    "LOCAL_CONFIG",
+                    initial_values.get("LOCAL_CONFIG", ""),
+                    "combo",
+                    self._candidate_project_files({".cmd", ".script", ".iocsh"}),
+                ),
+                ("SLAVE_ID", "SLAVE_ID", default_slave_id, "combo", self._known_slave_ids()),
+                ("HW_DESC", "HW_DESC", default_hw_desc, "combo", hw_desc_values),
+                ("EXTRA_MACROS", "Extra macros", "", "entry", None),
+            ]
+            script_name = "applySlaveConfig.cmd"
+        elif kind == "apply_config":
+            fields = []
+            script_name = "applyConfig.cmd"
         elif kind == "master":
             fields = [
                 ("MASTER_ID", "MASTER_ID", initial_values.get("MASTER_ID", "0"), "entry", None),
@@ -7060,6 +9867,15 @@ class ValidatorApp:
                 ("EXTRA_MACROS", "Extra macros", "", "entry", None),
             ]
             script_name = "loadYamlAxis.cmd"
+        elif kind == "configured_axis":
+            axis_config_values = self._candidate_project_files({".ax", ".pax"})
+            fields = [
+                ("CONFIG", "CONFIG", initial_values.get("CONFIG", "./cfg/axis.ax"), "combo", axis_config_values),
+                ("DEV", "DEV", initial_values.get("DEV", ""), "entry", None),
+                ("CLEAR_VARS_CMD", "CLEAR_VARS_CMD", initial_values.get("CLEAR_VARS_CMD", ""), "combo", ["", "ecmc_axis_unset", "empty"]),
+                ("CFG_MACROS", "CFG_MACROS", initial_values.get("CFG_MACROS", ""), "entry", None),
+            ]
+            script_name = "configureAxis.cmd"
         elif kind == "macro":
             fields = [
                 ("NAME", "Macro name", initial_values.get("NAME", ""), "entry", None),
@@ -7094,6 +9910,23 @@ class ValidatorApp:
                 ("DESC", "DESC", initial_values.get("DESC", ""), "entry", None),
             ]
             script_name = "loadPLCFile.cmd"
+        elif kind == "master_slave_sm":
+            fields = [
+                ("NAME", "NAME", initial_values.get("NAME", ""), "entry", None),
+                ("MST_GRP_NAME", "MST_GRP_NAME", initial_values.get("MST_GRP_NAME", ""), "entry", None),
+                ("SLV_GRP_NAME", "SLV_GRP_NAME", initial_values.get("SLV_GRP_NAME", ""), "entry", None),
+                ("MST_DISABLE", "MST_DISABLE", initial_values.get("MST_DISABLE", "0"), "combo", ["0", "1"]),
+                ("SLV_DISABLE", "SLV_DISABLE", initial_values.get("SLV_DISABLE", "0"), "combo", ["0", "1"]),
+                ("SM_ID", "SM_ID", initial_values.get("SM_ID", ""), "entry", None),
+            ]
+            script_name = "addMasterSlaveSM.cmd"
+        elif kind == "subst_config":
+            subst_values = self._candidate_project_files({".subs", ".subst", ".substitutions", ".template"})
+            fields = [
+                ("FILE", "Subst file", initial_values.get("FILE", "./cfg.subs"), "combo", subst_values),
+                ("MACROS", "MACROS", initial_values.get("MACROS", ""), "entry", None),
+            ]
+            script_name = "loadSubstConfig.cmd"
         elif kind == "component":
             return self._prompt_for_component_values(initial_values, mode=mode)
         elif kind == "plugin":
@@ -7155,6 +9988,25 @@ class ValidatorApp:
                 ("LOAD_RECS", "LOAD_RECS", initial_values.get("LOAD_RECS", ""), "entry", None),
             ]
             script_name = "addEcDataItem.cmd"
+        elif kind == "pvt_controller":
+            fields = [
+                ("TRG_EC_ENTRY", "TRG_EC_ENTRY", initial_values.get("TRG_EC_ENTRY", ""), "combo", self._ecmc_ec_path_choices("")),
+                ("TRG_DUR_S", "TRG_DUR_S", initial_values.get("TRG_DUR_S", "0.1"), "entry", None),
+                ("NAXES", "NAXES", initial_values.get("NAXES", ""), "entry", None),
+                ("NPOINTS", "NPOINTS", initial_values.get("NPOINTS", ""), "entry", None),
+                ("NREADBACK", "NREADBACK", initial_values.get("NREADBACK", ""), "entry", None),
+                ("NPULSES", "NPULSES", initial_values.get("NPULSES", ""), "entry", None),
+                ("MAX_SIZE", "MAX_SIZE", initial_values.get("MAX_SIZE", ""), "entry", None),
+                ("SOFT_TRG_FLNK", "SOFT_TRG_FLNK", initial_values.get("SOFT_TRG_FLNK", ""), "entry", None),
+            ]
+            script_name = "pvtControllerConfig.cmd"
+        elif kind == "lut":
+            lut_values = self._candidate_project_files({".lut", ".corr", ".txt"})
+            fields = [
+                ("FILE", "LUT file", initial_values.get("FILE", "./cfg/lut.txt"), "combo", lut_values),
+                ("LUT_ID", "LUT_ID", initial_values.get("LUT_ID", self._next_tree_id("lut", "LUT_ID")), "entry", None),
+            ]
+            script_name = "loadLUTFile.cmd"
         elif kind in {"plcvar_analog", "plcvar_binary"}:
             plc_id_values = self._known_plc_ids()
             default_plc_id = ""
@@ -7205,6 +10057,7 @@ class ValidatorApp:
 
         vars_by_name = {}
         first_widget = [None]
+        preferred_focus_widget = [None]
         result = {"command": None}
         ecmc_command_hint_var = tk.StringVar(value="")
 
@@ -7212,7 +10065,7 @@ class ValidatorApp:
             ttk.Label(dialog, text=label).grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
             var = tk.StringVar(value=default)
             vars_by_name[name] = var
-            if kind == "slave" and name == "HW_DESC" and values:
+            if kind in {"slave", "slave_config"} and name == "HW_DESC" and values:
                 container, focus_widget = self._create_filtered_value_picker(dialog, var, list(values or []), width=48)
                 container.grid(row=row, column=1, sticky=tk.EW, padx=8, pady=4)
                 widget = focus_widget
@@ -7229,7 +10082,7 @@ class ValidatorApp:
                         self._enable_combobox_filter(
                             widget,
                             list(values or []),
-                            auto_post=(kind == "slave" and name == "HW_DESC"),
+                            auto_post=(kind in {"slave", "slave_config"} and name == "HW_DESC"),
                         )
             else:
                 widget = ttk.Entry(dialog, textvariable=var, width=52)
@@ -7237,6 +10090,8 @@ class ValidatorApp:
                 widget.grid(row=row, column=1, sticky=tk.EW, padx=8, pady=4)
             if first_widget[0] is None:
                 first_widget[0] = widget
+            if preferred_field and name == preferred_field:
+                preferred_focus_widget[0] = widget
 
         next_row = len(fields)
         if kind == "ecmc_command":
@@ -7255,6 +10110,14 @@ class ValidatorApp:
             ttk.Label(
                 dialog,
                 text="Restores record update rate to the original startup setting.",
+                justify=tk.LEFT,
+                wraplength=460,
+            ).grid(row=next_row, column=0, columnspan=2, sticky=tk.W, padx=8, pady=4)
+            next_row += 1
+        elif kind == "apply_config":
+            ttk.Label(
+                dialog,
+                text="Applies the EtherCAT bus configuration and calculates process image offsets.",
                 justify=tk.LEFT,
                 wraplength=460,
             ).grid(row=next_row, column=0, columnspan=2, sticky=tk.W, padx=8, pady=4)
@@ -7357,8 +10220,14 @@ class ValidatorApp:
         dialog.deiconify()
         dialog.wait_visibility()
         dialog.grab_set()
-        if first_widget[0] is not None:
-            first_widget[0].focus_set()
+        focus_widget = preferred_focus_widget[0] or first_widget[0]
+        if focus_widget is not None:
+            focus_widget.focus_set()
+            if hasattr(focus_widget, "selection_range"):
+                try:
+                    focus_widget.selection_range(0, "end")
+                except Exception:
+                    pass
         self.root.wait_window(dialog)
         return result["command"]
 
@@ -7887,7 +10756,7 @@ class ValidatorApp:
         self.status_var.set("Removed object subtree")
         self._refresh_startup_tree()
 
-    def _edit_selected_object(self) -> None:
+    def _edit_selected_object(self, preferred_field: str = "") -> None:
         from tkinter import messagebox
 
         obj = self._selected_editable_object()
@@ -7900,7 +10769,7 @@ class ValidatorApp:
             return
 
         current_values = self._object_detail_map(obj)
-        self._apply_object_update(obj, current_values)
+        self._apply_object_update(obj, current_values, preferred_field=preferred_field)
 
     def _edit_selected_parameter(self, event=None) -> Optional[str]:
         from tkinter import simpledialog, messagebox
@@ -7941,7 +10810,7 @@ class ValidatorApp:
 
         updated_values = dict(editable_map)
         updated_values[key] = new_value
-        self._apply_object_update(obj, updated_values)
+        self._apply_direct_object_update(obj, updated_values)
         return "break"
 
     def _edit_selected_tree_entry(self, _event=None) -> Optional[str]:
@@ -7966,9 +10835,9 @@ class ValidatorApp:
         obj = payload
         editable_map = self._object_detail_map(obj)
         item_id = selected[0]
-        key = self.startup_tree.item(item_id, "text")
+        key = self._tree_text_logical_name(self.startup_tree.item(item_id, "text"))
         current_values = self.startup_tree.item(item_id, "values")
-        current_value = current_values[1] if len(current_values) > 1 else ""
+        current_value = current_values[0] if current_values else ""
 
         if entry_type == "linked-file":
             key = "FILE"
@@ -7993,7 +10862,7 @@ class ValidatorApp:
 
         updated_values = dict(editable_map)
         updated_values[key] = new_value
-        self._apply_object_update(obj, updated_values)
+        self._apply_direct_object_update(obj, updated_values)
         return "break"
 
     def _on_startup_tree_selected(self, _event=None) -> None:
@@ -8007,21 +10876,9 @@ class ValidatorApp:
         self._set_editor_tree_highlight(selected[0])
         self._populate_param_tree_for_entry(entry_type, payload)
         self._refresh_context_panel(entry)
-
-        if entry_type == "file":
-            if self._suppress_tree_open_on_select:
-                return
-            self._open_file_in_editor(payload.path, line=payload.parent_line)
-            return
-
-        obj = payload
         if self._suppress_tree_open_on_select:
             return
-
-        if entry_type in {"linked-file", "linked-detail", "linked-detail-group"} and obj.linked_file is not None and obj.linked_file.exists():
-            self._open_file_in_editor(obj.linked_file, linked_object_key=self._object_tree_key(obj))
-        else:
-            self._open_file_in_editor(obj.source, line=obj.line)
+        self._show_tree_entry_in_editor(entry)
 
     def _show_validation_results(self, startup_path: Path, result: ValidationResult) -> None:
         self._populate_issues(startup_path, result)
