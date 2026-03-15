@@ -132,6 +132,7 @@ class StartupTreeModel:
 class RepositoryInventory:
     ecmccfg_root: Optional[Path]
     ecmccomp_root: Optional[Path]
+    ecmc_root: Optional[Path]
     module_scripts: Dict[str, List[Path]]
     module_macro_specs: Dict[str, "MacroSpec"]
     module_macro_usage: Dict[str, "FileMacroUsage"]
@@ -141,6 +142,7 @@ class RepositoryInventory:
     hardware_entries: Dict[str, Set[str]]
     component_definitions: Dict[str, "ComponentDefinition"]
     component_support: Dict[str, Dict[str, "ComponentSupport"]]
+    ecmc_command_definitions: Dict[str, List["EcmcCommandDefinition"]]
     known_commands: Set[str]
     ecb_schema: Optional[Dict[str, object]]
 
@@ -171,6 +173,15 @@ class ComponentSupport:
     path: Path
     supported_macros: Set[str]
     channel_count: Optional[int]
+
+
+@dataclass(frozen=True)
+class EcmcCommandDefinition:
+    command_name: str
+    syntax: str
+    function_name: str
+    brief: str
+    header: Optional[Path]
 
 
 @dataclass
@@ -244,6 +255,35 @@ def _find_ecmccomp_root(ecmccfg_root: Optional[Path], anchor: Optional[Path] = N
             (submodule_root / "scripts" / "applyComponent.cmd").exists()
             and ((submodule_root / "drive_slaves").is_dir() or (submodule_root / "motors").is_dir())
         ):
+            return submodule_root
+    return None
+
+
+def _find_ecmc_root(ecmccfg_root: Optional[Path], anchor: Optional[Path] = None) -> Optional[Path]:
+    candidates: List[Path] = []
+    if anchor is not None:
+        resolved_anchor = anchor.resolve()
+        candidates.extend([resolved_anchor, *resolved_anchor.parents])
+    if ecmccfg_root is not None:
+        resolved_cfg_root = ecmccfg_root.resolve()
+        candidates.extend([resolved_cfg_root, *resolved_cfg_root.parents])
+
+    script_dir = Path(__file__).resolve().parent
+    candidates.extend([script_dir, *script_dir.parents])
+
+    cwd = Path.cwd().resolve()
+    candidates.extend([cwd, *cwd.parents])
+
+    seen: Set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        direct_root = candidate
+        if (direct_root / "devEcmcSup" / "com" / "ecmcCmdParser.c").exists():
+            return direct_root
+        submodule_root = candidate / "ecmc"
+        if (submodule_root / "devEcmcSup" / "com" / "ecmcCmdParser.c").exists():
             return submodule_root
     return None
 
@@ -422,6 +462,7 @@ def _build_repository_inventory(ecmccfg_root: Optional[Path]) -> RepositoryInven
         return RepositoryInventory(
             ecmccfg_root=None,
             ecmccomp_root=None,
+            ecmc_root=None,
             module_scripts={},
             module_macro_specs={},
             module_macro_usage={},
@@ -431,6 +472,7 @@ def _build_repository_inventory(ecmccfg_root: Optional[Path]) -> RepositoryInven
             hardware_entries={},
             component_definitions={},
             component_support={},
+            ecmc_command_definitions={},
             known_commands=set(KNOWN_IOCSH_COMMANDS),
             ecb_schema=None,
         )
@@ -458,11 +500,14 @@ def _build_repository_inventory(ecmccfg_root: Optional[Path]) -> RepositoryInven
     hardware_index = _index_by_name(hardware_paths)
     hardware_component_types = _build_hardware_component_type_inventory(hardware_index)
     ecmccomp_root = _find_ecmccomp_root(ecmccfg_root)
+    ecmc_root = _find_ecmc_root(ecmccfg_root)
     component_definitions, component_support = _build_component_library_inventory(ecmccomp_root)
+    ecmc_command_definitions = _build_ecmc_command_inventory(ecmc_root)
 
     return RepositoryInventory(
         ecmccfg_root=ecmccfg_root.resolve(),
         ecmccomp_root=ecmccomp_root.resolve() if ecmccomp_root is not None else None,
+        ecmc_root=ecmc_root.resolve() if ecmc_root is not None else None,
         module_scripts=_index_by_name(module_script_paths),
         module_macro_specs={path.name: _build_macro_spec(path) for path in module_script_paths},
         module_macro_usage={path.name: _build_macro_usage(path) for path in module_script_paths},
@@ -472,6 +517,7 @@ def _build_repository_inventory(ecmccfg_root: Optional[Path]) -> RepositoryInven
         hardware_entries=_build_hardware_entry_inventory(hardware_index),
         component_definitions=component_definitions,
         component_support=component_support,
+        ecmc_command_definitions=ecmc_command_definitions,
         known_commands=_scan_known_commands(ecmccfg_root),
         ecb_schema=ecb_schema,
     )
@@ -713,6 +759,159 @@ def _build_component_library_inventory(
     return component_definitions, component_support
 
 
+def _clean_doc_block_lines(block: str) -> List[str]:
+    lines: List[str] = []
+    for raw_line in block.splitlines():
+        cleaned = re.sub(r"^\s*/?\*+\s?", "", raw_line.rstrip())
+        cleaned = cleaned.strip()
+        if cleaned.endswith("*/"):
+            cleaned = cleaned[:-2].rstrip()
+        if cleaned:
+            lines.append(cleaned)
+    return lines
+
+
+def _extract_doc_brief(block: str) -> str:
+    lines = _clean_doc_block_lines(block)
+    for line in lines:
+        if "\\brief" in line:
+            return line.split("\\brief", 1)[1].strip().rstrip("\\n")
+        if "@brief" in line:
+            return line.split("@brief", 1)[1].strip().rstrip("\\n")
+    for line in lines:
+        if line.startswith(("\\", "@", "*")):
+            continue
+        return line.rstrip("\\n")
+    return ""
+
+
+def _extract_parser_comment_syntax(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith(("///", "/*", "*", "//")):
+        return ""
+    single_line = " ".join(part.strip() for part in text.splitlines())
+    match = re.search(r"(Cfg\.[A-Za-z0-9_?]+(?:\([^)]*\)|=[^\"*/]*))", single_line)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"\"([A-Za-z][A-Za-z0-9_.?]+(?:\([^\"\n]*\)|=[^\"\n]*))\"", single_line)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def _extract_ecmc_inner_command_name(command_text: str) -> str:
+    cleaned = _strip_wrapper_pairs(_normalize_value(command_text)).strip()
+    if cleaned.startswith("Cfg."):
+        cleaned = cleaned[4:]
+    match = re.match(r"([A-Za-z_][A-Za-z0-9_?]*)", cleaned)
+    return match.group(1) if match else ""
+
+
+def _extract_parser_handler_name(lines: List[str], start_index: int) -> str:
+    for offset in range(1, 12):
+        if start_index + offset >= len(lines):
+            break
+        line = lines[start_index + offset]
+        for pattern in (
+            r"\breturn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            r"SEND_[A-Z_]+\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        ):
+            match = re.search(pattern, line)
+            if match:
+                return match.group(1)
+    return ""
+
+
+def _build_ecmc_function_doc_index(ecmc_root: Optional[Path]) -> Dict[str, Tuple[str, Path]]:
+    if ecmc_root is None or not ecmc_root.exists():
+        return {}
+
+    doc_index: Dict[str, Tuple[str, Path]] = {}
+    pattern = re.compile(
+        r"/\*\*(?P<doc>.*?)\*/\s*(?:[A-Za-z_][A-Za-z0-9_\s\*]*?\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        re.S,
+    )
+    for header_path in sorted((ecmc_root / "devEcmcSup").rglob("*.h")):
+        try:
+            text = _read_text(header_path)
+        except Exception:
+            continue
+        for match in pattern.finditer(text):
+            name = match.group("name")
+            if name in doc_index:
+                continue
+            brief = _extract_doc_brief(match.group("doc"))
+            doc_index[name] = (brief, header_path)
+    return doc_index
+
+
+def _build_ecmc_command_inventory(ecmc_root: Optional[Path]) -> Dict[str, List[EcmcCommandDefinition]]:
+    if ecmc_root is None:
+        return {}
+
+    parser_path = ecmc_root / "devEcmcSup" / "com" / "ecmcCmdParser.c"
+    if not parser_path.exists():
+        return {}
+
+    doc_index = _build_ecmc_function_doc_index(ecmc_root)
+    try:
+        lines = _read_text(parser_path).splitlines()
+    except Exception:
+        return {}
+
+    command_inventory: Dict[str, List[EcmcCommandDefinition]] = {}
+    seen: Set[Tuple[str, str, str]] = set()
+    comment_block = ""
+    comment_start_index = -1
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        syntax = ""
+        syntax_index = index
+        if comment_block:
+            comment_block += "\n" + line
+            if "*/" in line:
+                syntax = _extract_parser_comment_syntax(comment_block)
+                syntax_index = comment_start_index
+                comment_block = ""
+                comment_start_index = -1
+        elif stripped.startswith("/*") and "Cfg." in stripped:
+            if "*/" in stripped:
+                syntax = _extract_parser_comment_syntax(line)
+            else:
+                comment_block = line
+                comment_start_index = index
+                continue
+        else:
+            syntax = _extract_parser_comment_syntax(line)
+        if not syntax:
+            continue
+        command_name = _extract_ecmc_inner_command_name(syntax)
+        if not command_name:
+            continue
+        function_name = _extract_parser_handler_name(lines, syntax_index)
+        brief = ""
+        header_path: Optional[Path] = None
+        if function_name in doc_index:
+            brief, header_path = doc_index[function_name]
+        key = (command_name, syntax, function_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        command_inventory.setdefault(command_name, []).append(
+            EcmcCommandDefinition(
+                command_name=command_name,
+                syntax=syntax,
+                function_name=function_name,
+                brief=brief,
+                header=header_path,
+            )
+        )
+
+    for definitions in command_inventory.values():
+        definitions.sort(key=lambda item: (item.syntax, item.function_name))
+    return command_inventory
+
+
 def _normalize_value(value: str) -> str:
     cleaned = value.strip()
     if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
@@ -935,6 +1134,23 @@ def _extract_dbloadrecords_call(line: str) -> Optional[Tuple[str, Dict[str, str]
     payload = match.group(2).strip()
     pairs, _malformed = _parse_macro_payload(payload)
     return db_file, {key: value for key, value in pairs}
+
+
+def _extract_ecmc_config_invocation(line: str) -> Optional[Tuple[str, str]]:
+    stripped = _strip_inline_comment(line).strip()
+    wrapper = _extract_command_name(stripped)
+    if wrapper not in {"ecmcConfig", "ecmcConfigOrDie"}:
+        return None
+
+    remaining = _strip_leading_macro_prefixes(stripped)
+    if not remaining.startswith(wrapper):
+        return None
+
+    token, _ = _read_token(remaining, len(wrapper))
+    command_text = _strip_wrapper_pairs(_normalize_value(token))
+    if not command_text:
+        return None
+    return wrapper, command_text
 
 
 def _parse_macro_payload(payload: str) -> Tuple[List[Tuple[str, str]], List[str]]:
@@ -2446,6 +2662,29 @@ def _parse_extra_macro_items(raw_text: str) -> List[Tuple[str, str]]:
     return items
 
 
+def _lookup_ecmc_command_definitions(
+    command_text: str,
+    inventory: RepositoryInventory,
+) -> List[EcmcCommandDefinition]:
+    command_name = _extract_ecmc_inner_command_name(command_text)
+    if not command_name:
+        return []
+    return list(inventory.ecmc_command_definitions.get(command_name, []))
+
+
+def _normalize_ecmc_command_text(command_text: str) -> str:
+    cleaned = _strip_wrapper_pairs(_normalize_value(command_text)).strip()
+    if not cleaned:
+        return ""
+    if not cleaned.startswith("Cfg."):
+        return cleaned
+    match = re.match(r"Cfg\.(?P<name>[A-Za-z_][A-Za-z0-9_?]*)\((?P<args>.*)\)$", cleaned)
+    if not match:
+        return cleaned
+    arguments = [token.strip() for token in _split_top_level(match.group("args"))]
+    return "Cfg.{}({})".format(match.group("name"), ",".join(arguments))
+
+
 def _extract_startup_objects_from_file(
     path: Path,
     text: str,
@@ -2481,6 +2720,52 @@ def _extract_startup_objects_from_file(
             continue
 
         command_name = _extract_command_name(line)
+        ecmc_config_call = _extract_ecmc_config_invocation(line)
+        if ecmc_config_call is not None:
+            wrapper_name, raw_command_text = ecmc_config_call
+            normalized_raw_command_text = _normalize_ecmc_command_text(raw_command_text)
+            expanded_command_text = _normalize_ecmc_command_text(_expand_text_macros(normalized_raw_command_text, env_values))
+            command_defs = _lookup_ecmc_command_definitions(expanded_command_text, inventory)
+            inner_command_name = _extract_ecmc_inner_command_name(expanded_command_text) or _extract_ecmc_inner_command_name(
+                normalized_raw_command_text
+            )
+            title_name = inner_command_name or expanded_command_text or normalized_raw_command_text
+            detail_rows: List[Tuple[str, str]] = [
+                ("WRAPPER", wrapper_name),
+                ("COMMAND", normalized_raw_command_text),
+            ]
+            if expanded_command_text and expanded_command_text != normalized_raw_command_text:
+                detail_rows.append(("EXPANDED_COMMAND", expanded_command_text))
+            if inner_command_name:
+                detail_rows.append(("NAME", inner_command_name))
+            if command_defs:
+                function_names = ", ".join(sorted({definition.function_name for definition in command_defs if definition.function_name}))
+                syntaxes = " | ".join(definition.syntax for definition in command_defs[:4])
+                briefs = " | ".join(
+                    definition.brief for definition in command_defs if definition.brief
+                )
+                header_paths = " | ".join(
+                    str(definition.header) for definition in command_defs if definition.header is not None
+                )
+                if function_names:
+                    detail_rows.append(("FUNCTION", function_names))
+                if syntaxes:
+                    detail_rows.append(("SYNTAX", syntaxes))
+                if briefs:
+                    detail_rows.append(("DESCRIPTION", briefs))
+                if header_paths:
+                    detail_rows.append(("HEADER", header_paths))
+            summary_text = expanded_command_text or raw_command_text
+            objects.append(
+                StartupObject(
+                    kind="ecmc_command",
+                    source=path,
+                    line=line_no,
+                    title=title_name,
+                    summary="{}: {}".format(wrapper_name, summary_text),
+                    details=detail_rows,
+                )
+            )
         if command_name == "require":
             module_name, version, require_macro_pairs = _parse_require_invocation(line)
             for key, value in require_macro_pairs:
@@ -2580,6 +2865,45 @@ def _extract_startup_objects_from_file(
                     title="Master {}".format(env_values.get("MASTER_ID", str(current_master_id or 0))),
                     summary="MASTER_ID={}".format(env_values.get("MASTER_ID", str(current_master_id or 0))),
                     details=_format_tree_details(expanded_key_map, ["MASTER_ID"]),
+                )
+            )
+
+        if module_script_name == "setRecordUpdateRate.cmd":
+            rate_ms = expanded_key_map.get("RATE_MS", env_values.get("ECMC_EC_SAMPLE_RATE_MS", ""))
+            if rate_ms:
+                env_values["ECMC_SAMPLE_RATE_MS"] = rate_ms
+            detail_rows = _format_tree_details(expanded_key_map, ["RATE_MS"])
+            command_rows = _format_command_macro_details(
+                module_script_name,
+                expanded_key_map,
+                inventory,
+                ["RATE_MS"],
+            )
+            objects.append(
+                StartupObject(
+                    kind="record_update_rate",
+                    source=path,
+                    line=line_no,
+                    title="Set Record Rate",
+                    summary="RATE_MS={}".format(rate_ms or "<default>"),
+                    details=detail_rows,
+                    command_details=command_rows,
+                )
+            )
+
+        if module_script_name == "restoreRecordUpdateRate.cmd":
+            restored_rate = env_values.get("ECMC_SAMPLE_RATE_MS_ORIGINAL", env_values.get("ECMC_EC_SAMPLE_RATE_MS", ""))
+            if restored_rate:
+                env_values["ECMC_SAMPLE_RATE_MS"] = restored_rate
+            objects.append(
+                StartupObject(
+                    kind="restore_record_update_rate",
+                    source=path,
+                    line=line_no,
+                    title="Restore Record Rate",
+                    summary="Restore startup record rate",
+                    details=[],
+                    command_details=[],
                 )
             )
 
@@ -3323,7 +3647,10 @@ class ValidatorApp:
         left.add(object_frame, weight=3)
         left.add(lower_left, weight=2)
 
-        ttk.Label(object_frame, text="Objects", style="Section.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        ttk.Label(object_frame, text="Objects", style="Section.TLabel").pack(anchor=tk.W)
+        ttk.Label(object_frame, text="Execution order flows top to bottom", style="Muted.TLabel").pack(
+            anchor=tk.W, pady=(0, 6)
+        )
         self.startup_tree = ttk.Treeview(
             object_frame,
             columns=("type", "summary"),
@@ -3615,6 +3942,9 @@ class ValidatorApp:
             "kind-ecdataitem": {"foreground": "#00838f"},
             "kind-plcvar_analog": {"foreground": "#558b2f"},
             "kind-plcvar_binary": {"foreground": "#33691e"},
+            "kind-ecmc_command": {"foreground": "#5c6bc0"},
+            "kind-record_update_rate": {"foreground": "#1565c0"},
+            "kind-restore_record_update_rate": {"foreground": "#6d4c41"},
         }
         for tag_name, options in tag_styles.items():
             self.startup_tree.tag_configure(tag_name, **options)
@@ -3624,6 +3954,11 @@ class ValidatorApp:
 
     def _object_tree_key(self, obj: StartupObject) -> Tuple[Path, int, str, str]:
         return (obj.source.resolve(), obj.line, obj.kind, obj.title)
+
+    def _tree_label_for_object(self, obj: StartupObject, flow_index: Optional[int]) -> str:
+        if flow_index is None:
+            return obj.title
+        return "{:02d} ↓ {}".format(flow_index, obj.title)
 
     def _on_editor_scrollbar(self, *args) -> None:
         self.editor_text.yview(*args)
@@ -4895,6 +5230,7 @@ class ValidatorApp:
             axis_items: Dict[int, str] = {}
             plc_items: Dict[int, str] = {}
             last_plc_item = ""
+            top_level_flow_index = 0
 
             for obj in file_node.objects:
                 obj_parent_item = file_item
@@ -4907,11 +5243,15 @@ class ValidatorApp:
                         obj_parent_item = plc_items.get(obj.parent_plc_id, last_plc_item or file_item)
                     elif last_plc_item:
                         obj_parent_item = last_plc_item
+                flow_index = None
+                if obj_parent_item == file_item:
+                    top_level_flow_index += 1
+                    flow_index = top_level_flow_index
                 object_key = self._object_tree_key(obj)
                 obj_item = self.startup_tree.insert(
                     obj_parent_item,
                     "end",
-                    text=obj.title,
+                    text=self._tree_label_for_object(obj, flow_index),
                     values=(obj.kind.upper(), obj.summary),
                     open=("object", object_key) in expanded_keys,
                     tags=self._tree_tags_for_object(obj),
@@ -5059,9 +5399,7 @@ class ValidatorApp:
             entry_type, payload = entry
             if self._is_tree_entry_editable(entry):
                 editable_state = "normal"
-            if entry_type != "file":
-                open_state = "normal"
-            elif entry_type == "file":
+            if self._can_open_tree_entry_file(entry):
                 open_state = "normal"
             if entry_type == "object":
                 copy_state = "normal"
@@ -5088,6 +5426,26 @@ class ValidatorApp:
             self.move_up_button.configure(state=move_up_state)
         if self.move_down_button is not None:
             self.move_down_button.configure(state=move_down_state)
+
+    def _can_open_tree_entry_file(self, entry: Optional[Tuple[str, object]]) -> bool:
+        return self._tree_entry_open_target(entry) is not None
+
+    def _tree_entry_open_target(
+        self, entry: Optional[Tuple[str, object]]
+    ) -> Optional[Tuple[Path, Optional[int], Optional[str]]]:
+        if entry is None:
+            return None
+        entry_type, payload = entry
+        if entry_type == "file":
+            return (payload.path, payload.parent_line, None)
+        obj = payload
+        if entry_type in {"linked-file", "linked-detail", "linked-detail-group"}:
+            if obj.linked_file is None:
+                return None
+            return (obj.linked_file, None, self._object_tree_key(obj))
+        if entry_type in {"object", "detail", "detail-group"} and obj.linked_file is not None:
+            return (obj.linked_file, None, self._object_tree_key(obj))
+        return None
 
     def _is_tree_entry_editable(self, entry: Optional[Tuple[str, object]]) -> bool:
         if entry is None:
@@ -5190,17 +5548,11 @@ class ValidatorApp:
 
     def _open_selected_object_file(self) -> None:
         entry = self._selected_startup_entry()
-        if entry is None:
+        target = self._tree_entry_open_target(entry)
+        if target is None:
             return
-        entry_type, payload = entry
-        if entry_type == "file":
-            self._open_file_in_editor(payload.path, line=payload.parent_line)
-            return
-        obj = payload
-        if entry_type in {"linked-file", "linked-detail", "linked-detail-group"} and obj.linked_file is not None:
-            self._open_file_in_editor(obj.linked_file, linked_object_key=self._object_tree_key(obj))
-            return
-        self._open_file_in_editor(obj.source, line=obj.line)
+        path, line, linked_object_key = target
+        self._open_file_in_editor(path, line=line, linked_object_key=linked_object_key)
 
     def _file_browser_root_for_startup(self, startup_path: Path) -> Path:
         return startup_path.resolve().parent
@@ -5439,6 +5791,9 @@ class ValidatorApp:
             "ecdataitem",
             "plcvar_analog",
             "plcvar_binary",
+            "ecmc_command",
+            "record_update_rate",
+            "restore_record_update_rate",
         }
 
     def _module_script_name_for_object(self, obj: StartupObject) -> str:
@@ -5453,6 +5808,8 @@ class ValidatorApp:
             "component": "applyComponent.cmd",
             "ecsdo": "addEcSdoRT.cmd",
             "ecdataitem": "addEcDataItem.cmd",
+            "record_update_rate": "setRecordUpdateRate.cmd",
+            "restore_record_update_rate": "restoreRecordUpdateRate.cmd",
         }
         if obj.kind == "require":
             module_name = dict(obj.details).get("MODULE", "")
@@ -5716,6 +6073,9 @@ class ValidatorApp:
             ("Slave", "slave", None),
             ("Axis", "axis", None),
             ("Macro", "macro", None),
+            ("Set Record Rate", "record_update_rate", None),
+            ("Restore Record Rate", "restore_record_update_rate", None),
+            ("ECMC Command", "ecmc_command", None),
             ("PLC", "plc", None),
             ("Plugin", "plugin", None),
             ("DataStorage", "datastorage", None),
@@ -5726,6 +6086,9 @@ class ValidatorApp:
             ("Add Slave", "slave", False),
             ("Add Axis", "axis", False),
             ("Add Macro", "macro", False),
+            ("Set Record Rate", "record_update_rate", False),
+            ("Restore Record Rate", "restore_record_update_rate", False),
+            ("Add ECMC Command", "ecmc_command", False),
             ("Add PLC", "plc", False),
             ("Add Plugin", "plugin", False),
             ("Add DataStorage", "datastorage", False),
@@ -5834,6 +6197,26 @@ class ValidatorApp:
                 allowed.append(hw_desc)
         return sorted(set(allowed))
 
+    def _available_ecmc_command_syntaxes(self) -> List[str]:
+        syntaxes: List[str] = []
+        for command_name in sorted(self.inventory.ecmc_command_definitions):
+            for definition in self.inventory.ecmc_command_definitions.get(command_name, []):
+                if definition.syntax and definition.syntax not in syntaxes:
+                    syntaxes.append(definition.syntax)
+        return syntaxes
+
+    def _ecmc_command_hint(self, command_text: str) -> str:
+        definitions = _lookup_ecmc_command_definitions(command_text, self.inventory)
+        if not definitions:
+            return "Unknown ECMC command"
+        definition = definitions[0]
+        parts: List[str] = []
+        if definition.function_name:
+            parts.append(definition.function_name)
+        if definition.brief:
+            parts.append(definition.brief)
+        return " | ".join(parts) if parts else "Known ECMC command"
+
     def _startup_root_dir(self) -> Path:
         startup_value = self.startup_var.get().strip()
         if startup_value:
@@ -5883,6 +6266,164 @@ class ValidatorApp:
 
     def _known_axis_ids(self) -> List[str]:
         return self._known_object_values("axis", "AXIS_ID")
+
+    def _known_master_ids(self) -> List[str]:
+        values = self._known_object_values("master", "MASTER_ID")
+        return values or ["0"]
+
+    def _known_plugin_ids(self) -> List[str]:
+        return self._known_object_values("plugin", "PLUGIN_ID")
+
+    def _known_datastorage_ids(self) -> List[str]:
+        return self._known_object_values("datastorage", "DS_ID")
+
+    def _filter_picker_values(self, values: List[str], current: str) -> List[str]:
+        if not current:
+            return list(values)
+        lowered = current.lower()
+        startswith_matches = [value for value in values if value.lower().startswith(lowered)]
+        contains_matches = [value for value in values if lowered in value.lower() and value not in startswith_matches]
+        return startswith_matches + contains_matches
+
+    def _resolve_ecmc_numeric_token(self, token: str) -> Optional[int]:
+        cleaned = token.strip()
+        if not cleaned:
+            return None
+        macro_map = self._startup_known_macro_map()
+        expanded = _expand_text_macros(cleaned, macro_map).strip()
+        return _parse_int_value(expanded)
+
+    def _ecmc_dynamic_param_kind(self, param_name: str) -> str:
+        lowered = param_name.lower()
+        if "entryidstring" in lowered or lowered in {"entryid", "entry_id"}:
+            return "entry_id"
+        if lowered in {"ecpath", "ecentrypathstring"} or "ecpath" in lowered:
+            return "ec_path"
+        return ""
+
+    def _ecmc_slave_token_from_values(
+        self,
+        params: List[Tuple[str, str]],
+        current_values: List[str],
+    ) -> str:
+        for index, (_param_type, param_name) in enumerate(params):
+            lowered = param_name.lower()
+            if any(token in lowered for token in {"slave", "slavepos", "slaveposition", "busposition"}):
+                if index < len(current_values):
+                    return current_values[index].strip()
+        return ""
+
+    def _ecmc_master_token_from_values(
+        self,
+        params: List[Tuple[str, str]],
+        current_values: List[str],
+    ) -> str:
+        for index, (_param_type, param_name) in enumerate(params):
+            if "master" in param_name.lower():
+                if index < len(current_values):
+                    return current_values[index].strip()
+        known_master_ids = self._known_master_ids()
+        return known_master_ids[0] if known_master_ids else "0"
+
+    def _ecmc_entry_choices_for_slave_token(self, slave_token: str) -> List[str]:
+        slave_id = self._resolve_ecmc_numeric_token(slave_token)
+        if slave_id is None:
+            return []
+        hw_desc = self._startup_slave_hw_desc_map().get(slave_id, "")
+        if not hw_desc:
+            return []
+        return sorted(self.inventory.hardware_entries.get(hw_desc, set()))
+
+    def _ecmc_all_ec_path_choices(self, master_token: str = "", slave_filter: str = "") -> List[str]:
+        master_id = self._resolve_ecmc_numeric_token(master_token)
+        if master_id is None:
+            master_id = 0
+        paths: List[str] = []
+        slave_map = self._startup_slave_hw_desc_map()
+        for slave_id in sorted(slave_map):
+            if slave_filter and str(slave_id) != slave_filter.strip():
+                continue
+            hw_desc = slave_map.get(slave_id, "")
+            for entry_name in sorted(self.inventory.hardware_entries.get(hw_desc, set())):
+                paths.append("ec{}.s{}.{}".format(master_id, slave_id, entry_name))
+        return paths
+
+    def _ecmc_ec_path_choices(self, current_value: str) -> List[str]:
+        cleaned = current_value.strip()
+        if not cleaned:
+            return self._ecmc_all_ec_path_choices()
+        match = re.match(r"(?P<prefix>ec(?P<master>[^.]+)\.s(?P<slave>[^.]+)\.)(?P<entry>[A-Za-z0-9_]*)$", cleaned)
+        if not match:
+            return self._filter_picker_values(self._ecmc_all_ec_path_choices(), cleaned)
+        prefix = match.group("prefix")
+        slave_token = match.group("slave")
+        entry_prefix = match.group("entry")
+        entries = self._ecmc_entry_choices_for_slave_token(slave_token)
+        return [prefix + entry_name for entry_name in self._filter_picker_values(entries, entry_prefix)]
+
+    def _parse_ecmc_command_signature(self, syntax: str) -> Tuple[str, List[Tuple[str, str]]]:
+        cleaned = syntax.strip()
+        if cleaned.startswith("Cfg."):
+            cleaned = cleaned[4:]
+        match = re.match(r"(?P<name>[A-Za-z_][A-Za-z0-9_?]*)\((?P<args>.*)\)$", cleaned)
+        if not match:
+            return cleaned.split("=", 1)[0].strip(), []
+        params: List[Tuple[str, str]] = []
+        for token in _split_top_level(match.group("args")):
+            item = token.strip().lstrip(",").strip()
+            if not item:
+                continue
+            parts = item.rsplit(" ", 1)
+            if len(parts) == 2:
+                param_type, param_name = parts[0].strip(), parts[1].strip()
+            else:
+                param_type, param_name = "", parts[0].strip()
+            params.append((param_type, param_name))
+        return match.group("name"), params
+
+    def _split_ecmc_command_arguments(self, command_text: str) -> List[str]:
+        cleaned = _strip_wrapper_pairs(_normalize_value(command_text)).strip()
+        if cleaned.startswith("Cfg."):
+            cleaned = cleaned[4:]
+        start = cleaned.find("(")
+        end = cleaned.rfind(")")
+        if start < 0 or end < start:
+            return []
+        return [token.strip() for token in _split_top_level(cleaned[start + 1 : end])]
+
+    def _ecmc_parameter_choices(self, command_name: str, param_name: str, param_type: str) -> List[str]:
+        lowered_name = param_name.lower()
+        lowered_type = param_type.lower()
+        if "axis" in lowered_name:
+            return self._known_axis_ids()
+        if any(token in lowered_name for token in {"slave", "slavepos", "slaveposition", "busposition"}):
+            return self._known_slave_ids()
+        if "master" in lowered_name:
+            return self._known_master_ids()
+        if "plc" in lowered_name:
+            return self._known_plc_ids()
+        if "plugin" in lowered_name:
+            return self._known_plugin_ids()
+        if "storage" in lowered_name or lowered_name in {"ds_id", "dsid"}:
+            return self._known_datastorage_ids()
+        if "datatype" in lowered_name or lowered_name == "dt":
+            return ["BIT", "U8", "S8", "U16", "S16", "U32", "S32", "U64", "S64", "F32", "F64"]
+        if "bytesize" in lowered_name or lowered_name == "bits":
+            return ["1", "2", "4", "8", "16", "32", "64"]
+        if any(token in lowered_name for token in {"enable", "allow", "block", "use", "done"}):
+            return ["0", "1"]
+        if lowered_type in {"int", "uint16_t", "uint32_t", "uint8_t"} and lowered_name in {"value", "mode"}:
+            return ["0", "1"]
+        return []
+
+    def _build_ecmc_command_text(self, syntax: str, arguments: List[str]) -> str:
+        cleaned = syntax.strip()
+        if cleaned.startswith("Cfg."):
+            cleaned = cleaned[4:]
+        match = re.match(r"(?P<name>[A-Za-z_][A-Za-z0-9_?]*)\((?P<args>.*)\)$", cleaned)
+        if not match:
+            return syntax.strip()
+        return "Cfg.{}({})".format(match.group("name"), ",".join(arg.strip() for arg in arguments))
 
     def _default_insert_slave_id(self, target_path: Path, content: str, insert_line: int) -> str:
         objects, _nested = _extract_startup_objects_from_file(
@@ -6205,6 +6746,242 @@ class ValidatorApp:
         self.root.wait_window(dialog)
         return result["command"]
 
+    def _prompt_for_ecmc_command_values(self, initial_values: Dict[str, str], mode: str = "add") -> Optional[str]:
+        from tkinter import messagebox
+
+        tk = self.tk
+        ttk = self.ttk
+        action_label = "Edit" if mode == "edit" else "Add"
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("{} ECMC Command".format(action_label))
+        dialog.transient(self.root)
+        dialog.withdraw()
+
+        syntax_values = self._available_ecmc_command_syntaxes()
+        wrapper_var = tk.StringVar(value=initial_values.get("WRAPPER", "ecmcConfigOrDie").strip() or "ecmcConfigOrDie")
+        command_var = tk.StringVar(value=initial_values.get("COMMAND", "").strip())
+        syntax_var = tk.StringVar(value="")
+        hint_var = tk.StringVar(value="")
+        preview_var = tk.StringVar(value="")
+        result: Dict[str, Optional[str]] = {"command": None}
+
+        current_command = command_var.get().strip()
+        matching_syntax = ""
+        current_name = _extract_ecmc_inner_command_name(current_command)
+        if current_name:
+            definitions = self.inventory.ecmc_command_definitions.get(current_name, [])
+            if definitions:
+                matching_syntax = definitions[0].syntax
+        if not matching_syntax and syntax_values:
+            matching_syntax = syntax_values[0]
+        syntax_var.set(matching_syntax)
+
+        ttk.Label(dialog, text="Wrapper").grid(row=0, column=0, sticky=tk.W, padx=8, pady=4)
+        wrapper_widget = ttk.Combobox(
+            dialog,
+            textvariable=wrapper_var,
+            values=["ecmcConfigOrDie", "ecmcConfig"],
+            width=48,
+            state="readonly",
+        )
+        wrapper_widget.grid(row=0, column=1, sticky=tk.EW, padx=8, pady=4)
+
+        ttk.Label(dialog, text="Syntax").grid(row=1, column=0, sticky=tk.NW, padx=8, pady=4)
+        syntax_container, syntax_focus_widget = self._create_filtered_value_picker(
+            dialog,
+            syntax_var,
+            syntax_values,
+            width=48,
+            height=10,
+        )
+        syntax_container.grid(row=1, column=1, sticky=tk.EW, padx=8, pady=4)
+
+        ttk.Label(dialog, text="Hint").grid(row=2, column=0, sticky=tk.NW, padx=8, pady=4)
+        ttk.Label(dialog, textvariable=hint_var, justify=tk.LEFT, wraplength=520).grid(
+            row=2, column=1, sticky=tk.W, padx=8, pady=4
+        )
+
+        params_frame = ttk.Frame(dialog)
+        params_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=(4, 0))
+        params_frame.columnconfigure(1, weight=1)
+        dialog.columnconfigure(1, weight=1)
+
+        ttk.Label(dialog, text="Preview").grid(row=4, column=0, sticky=tk.NW, padx=8, pady=4)
+        ttk.Label(dialog, textvariable=preview_var, justify=tk.LEFT, wraplength=520).grid(
+            row=4, column=1, sticky=tk.W, padx=8, pady=4
+        )
+
+        param_vars: List[tk.StringVar] = []
+        param_refreshers: List[object] = []
+        raw_arg_values = self._split_ecmc_command_arguments(current_command)
+
+        def rebuild_preview(*_args) -> None:
+            syntax = syntax_var.get().strip()
+            if not syntax:
+                preview_var.set(command_var.get().strip())
+                return
+            values = [var.get().strip() for var in param_vars]
+            current_preview = self._build_ecmc_command_text(syntax, values)
+            command_var.set(current_preview)
+            preview_var.set(current_preview)
+
+        def rebuild_params(*_args) -> None:
+            for child in params_frame.winfo_children():
+                child.destroy()
+            param_vars.clear()
+            param_refreshers.clear()
+
+            syntax = syntax_var.get().strip()
+            hint_var.set(self._ecmc_command_hint(syntax))
+            command_name, params = self._parse_ecmc_command_signature(syntax)
+            existing_args = self._split_ecmc_command_arguments(command_var.get().strip())
+            if not existing_args:
+                existing_args = raw_arg_values
+
+            if not params:
+                ttk.Label(
+                    params_frame,
+                    text="No parsed parameters for this syntax. The preview will use the selected syntax as-is.",
+                    justify=tk.LEFT,
+                    wraplength=520,
+                ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=4)
+                rebuild_preview()
+                return
+
+            for row, (param_type, param_name) in enumerate(params):
+                ttk.Label(params_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, pady=4)
+                default_value = existing_args[row] if row < len(existing_args) else ""
+                value_var = tk.StringVar(value=default_value)
+                param_vars.append(value_var)
+                dynamic_kind = self._ecmc_dynamic_param_kind(param_name)
+
+                if dynamic_kind:
+                    picker_frame = ttk.Frame(params_frame)
+                    picker_frame.grid(row=row, column=1, sticky=tk.EW, pady=4)
+                    picker_frame.columnconfigure(0, weight=1)
+                    picker_frame.rowconfigure(1, weight=1)
+
+                    entry_widget = ttk.Entry(picker_frame, textvariable=value_var, width=52)
+                    entry_widget.grid(row=0, column=0, sticky=tk.EW)
+
+                    list_container = ttk.Frame(picker_frame)
+                    list_container.grid(row=1, column=0, sticky=tk.EW, pady=(4, 0))
+                    list_container.columnconfigure(0, weight=1)
+                    list_container.rowconfigure(0, weight=1)
+
+                    listbox = tk.Listbox(
+                        list_container,
+                        exportselection=False,
+                        height=6,
+                        activestyle="none",
+                    )
+                    listbox.grid(row=0, column=0, sticky=tk.EW)
+                    scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=listbox.yview)
+                    scrollbar.grid(row=0, column=1, sticky=tk.NS)
+                    listbox.configure(yscrollcommand=scrollbar.set)
+
+                    def refresh_dynamic_list(
+                        _event=None,
+                        target_var=value_var,
+                        target_listbox=listbox,
+                        target_kind=dynamic_kind,
+                        target_index=row,
+                    ) -> None:
+                        current_values = [var.get().strip() for var in param_vars]
+                        if target_kind == "entry_id":
+                            slave_token = self._ecmc_slave_token_from_values(params, current_values)
+                            base_choices = self._ecmc_entry_choices_for_slave_token(slave_token)
+                            choices = self._filter_picker_values(base_choices, target_var.get().strip())
+                        else:
+                            choices = self._ecmc_ec_path_choices(target_var.get().strip())
+                        target_listbox.delete(0, tk.END)
+                        for item in choices[:200]:
+                            target_listbox.insert(tk.END, item)
+                        if choices:
+                            target_listbox.selection_clear(0, tk.END)
+                            target_listbox.selection_set(0)
+                            target_listbox.activate(0)
+
+                    def accept_dynamic_choice(
+                        _event=None,
+                        target_var=value_var,
+                        target_listbox=listbox,
+                    ) -> str:
+                        selection = target_listbox.curselection()
+                        if not selection:
+                            return "break"
+                        target_var.set(str(target_listbox.get(selection[0])))
+                        return "break"
+
+                    entry_widget.bind("<KeyRelease>", refresh_dynamic_list, add="+")
+                    listbox.bind("<ButtonRelease-1>", accept_dynamic_choice, add="+")
+                    listbox.bind("<Double-Button-1>", accept_dynamic_choice, add="+")
+                    listbox.bind("<Return>", accept_dynamic_choice, add="+")
+                    param_refreshers.append(refresh_dynamic_list)
+                    refresh_dynamic_list()
+                    value_var.trace_add("write", rebuild_preview)
+                else:
+                    choices = self._ecmc_parameter_choices(command_name, param_name, param_type)
+                    if choices:
+                        widget = ttk.Combobox(params_frame, textvariable=value_var, values=choices, width=48)
+                        self._enable_combobox_filter(widget, choices)
+                    else:
+                        widget = ttk.Entry(params_frame, textvariable=value_var, width=52)
+                    widget.grid(row=row, column=1, sticky=tk.EW, pady=4)
+                    value_var.trace_add("write", rebuild_preview)
+
+            for value_var in param_vars:
+                value_var.trace_add("write", lambda *_args: [refresher() for refresher in param_refreshers])
+
+            rebuild_preview()
+
+        def submit() -> None:
+            syntax = syntax_var.get().strip()
+            if not syntax:
+                messagebox.showerror("Missing syntax", "Select an ECMC command syntax.", parent=dialog)
+                return
+
+            _command_name, params = self._parse_ecmc_command_signature(syntax)
+            values = [var.get().strip() for var in param_vars]
+            if params:
+                missing = [params[index][1] for index, value in enumerate(values) if not value]
+                if missing:
+                    messagebox.showerror(
+                        "Missing parameters",
+                        "Enter values for: {}".format(", ".join(missing)),
+                        parent=dialog,
+                    )
+                    return
+                command_text = self._build_ecmc_command_text(syntax, values)
+            else:
+                command_text = syntax
+            command_text = _normalize_ecmc_command_text(command_text)
+
+            wrapper_name = wrapper_var.get().strip() or "ecmcConfigOrDie"
+            result["command"] = '{} "{}"\n'.format(wrapper_name, command_text.replace('"', '\\"'))
+            dialog.destroy()
+
+        def cancel() -> None:
+            dialog.destroy()
+
+        syntax_var.trace_add("write", rebuild_params)
+        wrapper_var.trace_add("write", rebuild_preview)
+        rebuild_params()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=5, column=0, columnspan=2, sticky=tk.E, padx=8, pady=8)
+        ttk.Button(button_frame, text="Cancel", command=cancel).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text=action_label, command=submit).pack(side=tk.RIGHT, padx=(0, 6))
+
+        dialog.bind("<Escape>", lambda _event: cancel())
+        dialog.deiconify()
+        dialog.wait_visibility()
+        dialog.grab_set()
+        syntax_focus_widget.focus_set()
+        self.root.wait_window(dialog)
+        return result["command"]
+
     def _apply_object_update(self, obj: StartupObject, values: Dict[str, str]) -> bool:
         from tkinter import messagebox
 
@@ -6408,6 +7185,16 @@ class ValidatorApp:
                 ("EXTRA_MACROS", "Extra macros", "", "entry", None),
             ]
             script_name = "ecmcPlcAnalog.db" if kind == "plcvar_analog" else "ecmcPlcBinary.db"
+        elif kind == "ecmc_command":
+            return self._prompt_for_ecmc_command_values(initial_values, mode=mode)
+        elif kind == "record_update_rate":
+            fields = [
+                ("RATE_MS", "RATE_MS", initial_values.get("RATE_MS", ""), "entry", None),
+            ]
+            script_name = "setRecordUpdateRate.cmd"
+        elif kind == "restore_record_update_rate":
+            fields = []
+            script_name = "restoreRecordUpdateRate.cmd"
         else:
             return None
 
@@ -6419,6 +7206,7 @@ class ValidatorApp:
         vars_by_name = {}
         first_widget = [None]
         result = {"command": None}
+        ecmc_command_hint_var = tk.StringVar(value="")
 
         for row, (name, label, default, widget_kind, values) in enumerate(fields):
             ttk.Label(dialog, text=label).grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
@@ -6430,18 +7218,47 @@ class ValidatorApp:
                 widget = focus_widget
                 dialog.rowconfigure(row, weight=1)
             elif widget_kind == "combo":
-                widget = ttk.Combobox(dialog, textvariable=var, values=values or [], width=48)
-                if values:
-                    self._enable_combobox_filter(
-                        widget,
-                        list(values or []),
-                        auto_post=(kind == "slave" and name == "HW_DESC"),
-                    )
+                if kind == "ecmc_command" and name == "COMMAND" and values:
+                    container, focus_widget = self._create_filtered_value_picker(dialog, var, list(values or []), width=48, height=10)
+                    container.grid(row=row, column=1, sticky=tk.EW, padx=8, pady=4)
+                    widget = focus_widget
+                    dialog.rowconfigure(row, weight=1)
+                else:
+                    widget = ttk.Combobox(dialog, textvariable=var, values=values or [], width=48)
+                    if values:
+                        self._enable_combobox_filter(
+                            widget,
+                            list(values or []),
+                            auto_post=(kind == "slave" and name == "HW_DESC"),
+                        )
             else:
                 widget = ttk.Entry(dialog, textvariable=var, width=52)
-            widget.grid(row=row, column=1, sticky=tk.EW, padx=8, pady=4)
+            if not (kind == "ecmc_command" and name == "COMMAND" and values):
+                widget.grid(row=row, column=1, sticky=tk.EW, padx=8, pady=4)
             if first_widget[0] is None:
                 first_widget[0] = widget
+
+        next_row = len(fields)
+        if kind == "ecmc_command":
+            ttk.Label(dialog, text="Hint").grid(row=next_row, column=0, sticky=tk.NW, padx=8, pady=4)
+            ttk.Label(dialog, textvariable=ecmc_command_hint_var, justify=tk.LEFT, wraplength=460).grid(
+                row=next_row, column=1, sticky=tk.W, padx=8, pady=4
+            )
+            next_row += 1
+
+            def refresh_ecmc_command_hint(*_args) -> None:
+                ecmc_command_hint_var.set(self._ecmc_command_hint(vars_by_name["COMMAND"].get().strip()))
+
+            vars_by_name["COMMAND"].trace_add("write", refresh_ecmc_command_hint)
+            refresh_ecmc_command_hint()
+        elif kind == "restore_record_update_rate":
+            ttk.Label(
+                dialog,
+                text="Restores record update rate to the original startup setting.",
+                justify=tk.LEFT,
+                wraplength=460,
+            ).grid(row=next_row, column=0, columnspan=2, sticky=tk.W, padx=8, pady=4)
+            next_row += 1
 
         if kind == "macro":
             def apply_macro_preset(*_args):
@@ -6503,6 +7320,18 @@ class ValidatorApp:
                 version_part = " {}".format(version) if version else ""
                 payload_part = ' "{}"'.format(payload) if payload else ""
                 result["command"] = "require {}{}{}\n".format(module_name, version_part, payload_part)
+            elif kind == "ecmc_command":
+                item_map = {key: value for key, value in items}
+                wrapper_name = item_map.get("WRAPPER", "ecmcConfigOrDie").strip() or "ecmcConfigOrDie"
+                command_text = item_map.get("COMMAND", "").strip()
+                if not command_text:
+                    from tkinter import messagebox
+
+                    messagebox.showerror("Missing command", "Enter an ECMC command string.", parent=dialog)
+                    return
+                result["command"] = '{} "{}"\n'.format(wrapper_name, command_text.replace('"', '\\"'))
+            elif kind == "restore_record_update_rate":
+                result["command"] = '${SCRIPTEXEC} ${ecmccfg_DIR}%s\n' % script_name
             elif kind in {"plcvar_analog", "plcvar_binary"}:
                 payload = ", ".join(
                     "{}={}".format(key, _quote_startup_value(value))
@@ -6518,7 +7347,7 @@ class ValidatorApp:
             dialog.destroy()
 
         button_frame = ttk.Frame(dialog)
-        button_frame.grid(row=len(fields), column=0, columnspan=2, sticky=tk.E, padx=8, pady=8)
+        button_frame.grid(row=next_row, column=0, columnspan=2, sticky=tk.E, padx=8, pady=8)
         ttk.Button(button_frame, text="Cancel", command=cancel).pack(side=tk.RIGHT)
         ttk.Button(button_frame, text=action_label, command=submit).pack(side=tk.RIGHT, padx=(0, 6))
 
@@ -7144,6 +7973,10 @@ class ValidatorApp:
         if entry_type == "linked-file":
             key = "FILE"
             current_value = editable_map.get("FILE", current_value)
+
+        if obj.kind == "ecmc_command" and key in {"WRAPPER", "COMMAND"}:
+            self._edit_selected_object()
+            return "break"
 
         if key not in editable_map:
             messagebox.showinfo("Read-only entry", "{} is not directly editable here.".format(key))
