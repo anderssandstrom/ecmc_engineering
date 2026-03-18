@@ -1,9 +1,9 @@
 [submodule "ecmccfg"]
 	path = ecmccfg
-	url = git@github.com:paulscherrerinstitute/ecmccfg.git
+	url = https://github.com/paulscherrerinstitute/ecmccfg.git
 [submodule "ecmccomp"]
 	path = ecmccomp
-	url = git@github.com:paulscherrerinstitute/ecmccomp.git
+	url = https://github.com/paulscherrerinstitute/ecmccomp.git
 [submodule "ecmc"]
 	path = ecmc
-	url = git@github.com:epics-modules/ecmc.git
+	url = https://github.com/epics-modules/ecmc.git
