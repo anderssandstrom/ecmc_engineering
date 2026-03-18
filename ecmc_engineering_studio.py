@@ -1635,11 +1635,17 @@ def _normalize_schema_selector_value(selector_path: str, value: Optional[str]) -
         return None
     normalized = str(value).strip("'\" ").lower()
     if selector_path == "axis.type":
+        compact = re.sub(r"[\s_]+", "", normalized)
         aliases = {
+            "debug": "0",
+            "real": "1",
             "joint": "1",
+            "physical": "1",
+            "motor": "1",
             "endeffector": "2",
+            "virtual": "2",
         }
-        return aliases.get(normalized, normalized)
+        return aliases.get(compact, compact)
     return normalized
 
 
