@@ -198,93 +198,43 @@ class ExpandedTextLine:
     text: str
 
 
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
 def _find_ecmccfg_root(anchor: Optional[Path] = None) -> Optional[Path]:
-    candidates: List[Path] = []
-    if anchor is not None:
-        resolved_anchor = anchor.resolve()
-        candidates.extend([resolved_anchor, *resolved_anchor.parents])
-
-    script_dir = Path(__file__).resolve().parent
-    candidates.extend([script_dir, *script_dir.parents])
-
-    cwd = Path.cwd().resolve()
-    candidates.extend([cwd, *cwd.parents])
-
-    seen: Set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        direct_root = candidate
-        if (direct_root / "hardware").is_dir() and (direct_root / "scripts").is_dir():
-            return direct_root
-        submodule_root = candidate / "ecmccfg"
-        if (submodule_root / "hardware").is_dir() and (submodule_root / "scripts").is_dir():
-            return submodule_root
+    repo_root = _repository_root()
+    candidate = repo_root / "ecmccfg"
+    if (candidate / "hardware").is_dir() and (candidate / "scripts").is_dir():
+        return candidate
+    if (repo_root / "hardware").is_dir() and (repo_root / "scripts").is_dir():
+        return repo_root
     return None
 
 
 def _find_ecmccomp_root(ecmccfg_root: Optional[Path], anchor: Optional[Path] = None) -> Optional[Path]:
-    candidates: List[Path] = []
-    if anchor is not None:
-        resolved_anchor = anchor.resolve()
-        candidates.extend([resolved_anchor, *resolved_anchor.parents])
-    if ecmccfg_root is not None:
-        resolved_cfg_root = ecmccfg_root.resolve()
-        candidates.extend([resolved_cfg_root, *resolved_cfg_root.parents])
-
-    script_dir = Path(__file__).resolve().parent
-    candidates.extend([script_dir, *script_dir.parents])
-
-    cwd = Path.cwd().resolve()
-    candidates.extend([cwd, *cwd.parents])
-
-    seen: Set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        direct_root = candidate
-        if (
-            (direct_root / "scripts" / "applyComponent.cmd").exists()
-            and ((direct_root / "drive_slaves").is_dir() or (direct_root / "motors").is_dir())
-        ):
-            return direct_root
-        submodule_root = candidate / "ecmccomp"
-        if (
-            (submodule_root / "scripts" / "applyComponent.cmd").exists()
-            and ((submodule_root / "drive_slaves").is_dir() or (submodule_root / "motors").is_dir())
-        ):
-            return submodule_root
+    repo_root = _repository_root()
+    candidate = repo_root / "ecmccomp"
+    if (
+        (candidate / "scripts" / "applyComponent.cmd").exists()
+        and ((candidate / "drive_slaves").is_dir() or (candidate / "motors").is_dir())
+    ):
+        return candidate
+    if (
+        (repo_root / "scripts" / "applyComponent.cmd").exists()
+        and ((repo_root / "drive_slaves").is_dir() or (repo_root / "motors").is_dir())
+    ):
+        return repo_root
     return None
 
 
 def _find_ecmc_root(ecmccfg_root: Optional[Path], anchor: Optional[Path] = None) -> Optional[Path]:
-    candidates: List[Path] = []
-    if anchor is not None:
-        resolved_anchor = anchor.resolve()
-        candidates.extend([resolved_anchor, *resolved_anchor.parents])
-    if ecmccfg_root is not None:
-        resolved_cfg_root = ecmccfg_root.resolve()
-        candidates.extend([resolved_cfg_root, *resolved_cfg_root.parents])
-
-    script_dir = Path(__file__).resolve().parent
-    candidates.extend([script_dir, *script_dir.parents])
-
-    cwd = Path.cwd().resolve()
-    candidates.extend([cwd, *cwd.parents])
-
-    seen: Set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        direct_root = candidate
-        if (direct_root / "devEcmcSup" / "com" / "ecmcCmdParser.c").exists():
-            return direct_root
-        submodule_root = candidate / "ecmc"
-        if (submodule_root / "devEcmcSup" / "com" / "ecmcCmdParser.c").exists():
-            return submodule_root
+    repo_root = _repository_root()
+    candidate = repo_root / "ecmc"
+    if (candidate / "devEcmcSup" / "com" / "ecmcCmdParser.c").exists():
+        return candidate
+    if (repo_root / "devEcmcSup" / "com" / "ecmcCmdParser.c").exists():
+        return repo_root
     return None
 
 
