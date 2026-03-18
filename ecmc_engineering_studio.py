@@ -8907,6 +8907,8 @@ class ValidatorApp:
                 self._add_startup_menu_item(child_menu, "Add PLC Analog", "plcvar_analog")
                 self._add_startup_menu_item(child_menu, "Add PLC Binary", "plcvar_binary")
             self.startup_menu.add_cascade(label="Add Child", menu=child_menu)
+        if selected_kind == "slave":
+            self.startup_menu.add_command(label="Available EC Entries", command=self._show_selected_slave_ec_entries)
 
         self._add_startup_menu_position_group(self.startup_menu, "Insert", root_insert_items)
 
@@ -9308,6 +9310,157 @@ class ValidatorApp:
         if payload.parent_slave_id is not None:
             return self._find_slave_object(payload.source, payload.parent_slave_id)
         return None
+
+    def _copy_text_to_clipboard(self, text: str) -> None:
+        cleaned = str(text).strip()
+        if not cleaned:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(cleaned)
+            self.status_var.set("Copied to clipboard")
+        except Exception:
+            pass
+
+    def _show_selected_slave_ec_entries(self) -> None:
+        from tkinter import messagebox
+
+        tk = self.tk
+        ttk = self.ttk
+        slave_obj = self._context_slave_for_selected_entry()
+        if slave_obj is None or slave_obj.kind != "slave":
+            messagebox.showinfo("Available EC Entries", "Select a slave object first.")
+            return
+
+        detail_map = dict(slave_obj.details)
+        hw_desc = detail_map.get("HW_DESC", "").strip()
+        slave_id = slave_obj.slave_id
+        if slave_id is None:
+            slave_id = _parse_int_value(detail_map.get("SLAVE_ID", ""))
+        if not hw_desc:
+            messagebox.showinfo("Available EC Entries", "The selected slave does not define HW_DESC.")
+            return
+
+        entry_names = sorted(self.inventory.hardware_entries.get(hw_desc, set()))
+        if not entry_names:
+            messagebox.showinfo(
+                "Available EC Entries",
+                "No hardware entry inventory is available for HW_DESC '{}'.".format(hw_desc),
+            )
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Available EC Entries")
+        dialog.transient(self.root)
+        dialog.geometry("760x540")
+        dialog.minsize(620, 420)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+
+        master_values = self._known_master_ids()
+        master_var = tk.StringVar(value=master_values[0] if master_values else "0")
+        filter_var = tk.StringVar(value="")
+        mode_var = tk.StringVar(value="path")
+        hint_var = tk.StringVar(value="")
+
+        header = ttk.Frame(dialog, padding=(10, 10, 10, 6))
+        header.grid(row=0, column=0, sticky=tk.EW)
+        header.columnconfigure(1, weight=1)
+        ttk.Label(
+            header,
+            text="Slave {} | HW_DESC {}".format(slave_id if slave_id is not None else "?", hw_desc),
+            style="PanelTitle.TLabel",
+        ).grid(row=0, column=0, columnspan=4, sticky=tk.W)
+        ttk.Label(header, text="Master").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        master_box = ttk.Combobox(
+            header,
+            textvariable=master_var,
+            values=master_values or ["0"],
+            width=8,
+            state="normal",
+        )
+        master_box.grid(row=1, column=1, sticky=tk.W, padx=(6, 12), pady=(8, 0))
+        ttk.Label(header, text="Filter").grid(row=1, column=2, sticky=tk.W, pady=(8, 0))
+        filter_entry = ttk.Entry(header, textvariable=filter_var, width=36)
+        filter_entry.grid(row=1, column=3, sticky=tk.EW, padx=(6, 0), pady=(8, 0))
+        mode_frame = ttk.Frame(header)
+        mode_frame.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
+        ttk.Radiobutton(mode_frame, text="Full EC Path", variable=mode_var, value="path").pack(side=tk.LEFT)
+        ttk.Radiobutton(mode_frame, text="Entry Name", variable=mode_var, value="entry").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(header, textvariable=hint_var, style="Hint.TLabel").grid(
+            row=3, column=0, columnspan=4, sticky=tk.W, pady=(8, 0)
+        )
+
+        body = ttk.Frame(dialog, padding=(10, 0, 10, 10))
+        body.grid(row=1, column=0, sticky=tk.NSEW)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        listbox = tk.Listbox(body, exportselection=False, activestyle="none")
+        listbox.grid(row=0, column=0, sticky=tk.NSEW)
+        scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=listbox.yview)
+        scrollbar.grid(row=0, column=1, sticky=tk.NS)
+        listbox.configure(yscrollcommand=scrollbar.set)
+
+        footer = ttk.Frame(dialog, padding=(10, 0, 10, 10))
+        footer.grid(row=2, column=0, sticky=tk.EW)
+
+        def display_values() -> List[str]:
+            filtered_entries = self._filter_picker_values(entry_names, filter_var.get().strip())
+            if mode_var.get() == "entry":
+                return filtered_entries
+            master_id = master_var.get().strip() or "0"
+            if slave_id is None:
+                return filtered_entries
+            return ["ec{}.s{}.{}".format(master_id, slave_id, entry_name) for entry_name in filtered_entries]
+
+        def selected_value() -> str:
+            selection = listbox.curselection()
+            if not selection:
+                return ""
+            return str(listbox.get(selection[0])).strip()
+
+        def repopulate(*_args) -> None:
+            previous = selected_value()
+            values = display_values()
+            listbox.delete(0, tk.END)
+            for value in values:
+                listbox.insert(tk.END, value)
+            hint_var.set("{} entries".format(len(values)))
+            if not values:
+                return
+            index = values.index(previous) if previous in values else 0
+            listbox.selection_clear(0, tk.END)
+            listbox.selection_set(index)
+            listbox.activate(index)
+            listbox.see(index)
+
+        def copy_selected(_event=None) -> str:
+            value = selected_value()
+            if value:
+                self._copy_text_to_clipboard(value)
+            return "break"
+
+        def copy_entry_name() -> None:
+            value = selected_value()
+            if not value:
+                return
+            self._copy_text_to_clipboard(value.rsplit(".", 1)[-1])
+
+        ttk.Button(footer, text="Copy Selected", command=copy_selected).pack(side=tk.LEFT)
+        ttk.Button(footer, text="Copy Entry Name", command=copy_entry_name).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(footer, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+
+        filter_var.trace_add("write", repopulate)
+        master_var.trace_add("write", repopulate)
+        mode_var.trace_add("write", repopulate)
+        filter_entry.bind("<Escape>", lambda _event: dialog.destroy(), add="+")
+        filter_entry.bind("<Return>", copy_selected, add="+")
+        listbox.bind("<Double-Button-1>", copy_selected, add="+")
+        listbox.bind("<Return>", copy_selected, add="+")
+        listbox.bind("<Escape>", lambda _event: dialog.destroy(), add="+")
+
+        repopulate()
+        filter_entry.focus_set()
 
     def _context_slave_for_component_dialog(self) -> Optional[StartupObject]:
         entry = self._selected_startup_entry()
