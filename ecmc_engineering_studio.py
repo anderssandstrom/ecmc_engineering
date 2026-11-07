@@ -1136,6 +1136,34 @@ def _parse_macro_payload(payload: str) -> Tuple[List[Tuple[str, str]], List[str]
     return pairs, malformed
 
 
+def _validate_macro_value_pairs(
+    source: Path,
+    line: int,
+    owner: str,
+    payload_label: str,
+    macro_pairs: List[Tuple[str, str]],
+    macro_scope: Dict[str, str],
+    target: Optional[Path] = None,
+) -> List[ValidationIssue]:
+    issues: List[ValidationIssue] = []
+    for key, value in macro_pairs:
+        expanded_value = _expand_text_macros(value, macro_scope)
+        unresolved = sorted(_scan_file_macro_usage(expanded_value).required)
+        if unresolved:
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    source=source,
+                    line=line,
+                    message=(
+                        "{} macro '{}' for '{}' expands to unresolved macro(s): {}"
+                    ).format(payload_label, key, owner, ", ".join(unresolved)),
+                    target=target,
+                )
+            )
+    return issues
+
+
 def _is_yaml_loader_script(module_script_name: str) -> bool:
     return module_script_name in {"loadYamlAxis.cmd", "loadYamlEnc.cmd", "loadYamlPlc.cmd"}
 
@@ -2187,6 +2215,19 @@ def _validate_single_file(
                             target=plc_target,
                         )
                     )
+                plc_macro_scope = dict(env_values)
+                plc_macro_scope.update(expanded_key_map)
+                issues.extend(
+                    _validate_macro_value_pairs(
+                        source=path,
+                        line=line_no,
+                        owner="loadPLCFile.cmd",
+                        payload_label="PLC",
+                        macro_pairs=plc_macro_pairs,
+                        macro_scope=plc_macro_scope,
+                        target=plc_target,
+                    )
+                )
             if plc_target is not None:
                 if _read_text_from_buffers(plc_target, buffer_lookup) is None:
                     issues.append(
@@ -2323,6 +2364,7 @@ def _validate_single_file(
                     )
                 )
 
+            support = support_map.get(definition.comp_type) if definition is not None and support_map else None
             macros_payload = expanded_key_map.get("MACROS", "").strip()
             if definition is not None and macros_payload:
                 macro_pairs, malformed_component_macros = _parse_macro_payload(macros_payload)
@@ -2335,7 +2377,18 @@ def _validate_single_file(
                             message=f"Malformed MACROS segment for 'applyComponent.cmd': {malformed}",
                         )
                     )
-                support = support_map.get(definition.comp_type) if support_map else None
+                component_macro_scope = dict(env_values)
+                component_macro_scope.update(expanded_key_map)
+                issues.extend(
+                    _validate_macro_value_pairs(
+                        source=path,
+                        line=line_no,
+                        owner="applyComponent.cmd",
+                        payload_label="Component",
+                        macro_pairs=macro_pairs,
+                        macro_scope=component_macro_scope,
+                    )
+                )
                 allowed_macros = support.supported_macros if support is not None else set()
                 invalid_macros = sorted(key for key, _value in macro_pairs if allowed_macros and key not in allowed_macros)
                 if invalid_macros:
@@ -2353,11 +2406,49 @@ def _validate_single_file(
                             ),
                         )
                     )
+            ch_id_value = expanded_key_map.get("CH_ID", "").strip()
+            if ch_id_value and "${" not in ch_id_value and "$(" not in ch_id_value:
+                parsed_ch_id = _parse_int_value(ch_id_value)
+                if parsed_ch_id is None:
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            source=path,
+                            line=line_no,
+                            message="CH_ID '{}' is not a valid integer for 'applyComponent.cmd'".format(ch_id_value),
+                        )
+                    )
+                elif parsed_ch_id < 1:
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            source=path,
+                            line=line_no,
+                            message="CH_ID {} is out of range for 'applyComponent.cmd' (minimum is 1)".format(parsed_ch_id),
+                        )
+                    )
+                elif support is not None and support.channel_count is not None and parsed_ch_id > support.channel_count:
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            source=path,
+                            line=line_no,
+                            message=(
+                                "CH_ID {} is out of range for component '{}' on EC_COMP_TYPE '{}' "
+                                "(supports channels 1..{})"
+                            ).format(
+                                parsed_ch_id,
+                                component_name,
+                                resolved_ec_comp_type or "<unset>",
+                                support.channel_count,
+                            ),
+                        )
+                    )
 
         if module_script_name == "configureAxis.cmd":
             cfg_macros_payload = expanded_key_map.get("CFG_MACROS", "").strip()
             if cfg_macros_payload:
-                _cfg_macro_pairs, malformed_cfg_macros = _parse_macro_payload(cfg_macros_payload)
+                cfg_macro_pairs, malformed_cfg_macros = _parse_macro_payload(cfg_macros_payload)
                 for malformed in malformed_cfg_macros:
                     issues.append(
                         ValidationIssue(
@@ -2367,11 +2458,23 @@ def _validate_single_file(
                             message=f"Malformed CFG_MACROS segment for 'configureAxis.cmd': {malformed}",
                         )
                     )
+                cfg_macro_scope = dict(env_values)
+                cfg_macro_scope.update(expanded_key_map)
+                issues.extend(
+                    _validate_macro_value_pairs(
+                        source=path,
+                        line=line_no,
+                        owner="configureAxis.cmd",
+                        payload_label="CFG",
+                        macro_pairs=cfg_macro_pairs,
+                        macro_scope=cfg_macro_scope,
+                    )
+                )
 
         if module_script_name == "loadSubstConfig.cmd":
             subst_macros_payload = expanded_key_map.get("MACROS", "").strip()
             if subst_macros_payload:
-                _subst_macro_pairs, malformed_subst_macros = _parse_macro_payload(subst_macros_payload)
+                subst_macro_pairs, malformed_subst_macros = _parse_macro_payload(subst_macros_payload)
                 for malformed in malformed_subst_macros:
                     issues.append(
                         ValidationIssue(
@@ -2381,6 +2484,18 @@ def _validate_single_file(
                             message=f"Malformed MACROS segment for 'loadSubstConfig.cmd': {malformed}",
                         )
                     )
+                subst_macro_scope = dict(env_values)
+                subst_macro_scope.update(expanded_key_map)
+                issues.extend(
+                    _validate_macro_value_pairs(
+                        source=path,
+                        line=line_no,
+                        owner="loadSubstConfig.cmd",
+                        payload_label="Substitution",
+                        macro_pairs=subst_macro_pairs,
+                        macro_scope=subst_macro_scope,
+                    )
+                )
 
         if module_script_name == "pvtControllerConfig.cmd":
             trigger_entry = expanded_key_map.get("TRG_EC_ENTRY", "").strip()
@@ -8887,10 +9002,14 @@ class ValidatorApp:
             self.startup_menu.add_command(label="Add Macro", command=self._add_inline_macro)
             self.startup_menu.add_separator()
 
+        if entry_type in {"object", "detail", "detail-group", "linked-file", "linked-detail", "linked-detail-group"}:
+            self.startup_menu.add_command(label="Copy Macros", command=self._copy_selected_macros)
         if entry_type == "object":
             self.startup_menu.add_command(label="Copy Object", command=self._copy_selected_object)
             if self.copied_object_text:
                 self.startup_menu.add_command(label="Paste Object", command=self._paste_copied_object)
+            self.startup_menu.add_separator()
+        elif entry_type in {"detail", "detail-group", "linked-file", "linked-detail", "linked-detail-group"}:
             self.startup_menu.add_separator()
         elif entry_type == "file" and self.copied_object_text:
             self.startup_menu.add_command(label="Paste Object", command=self._paste_copied_object)
@@ -9693,6 +9812,15 @@ class ValidatorApp:
                     parent=dialog,
                 )
                 return
+            ch_id_value = ch_id_var.get().strip()
+            parsed_ch_id = _parse_int_value(ch_id_value)
+            if parsed_ch_id is None or parsed_ch_id < 1:
+                messagebox.showerror(
+                    "Invalid channel",
+                    "CH_ID must be an integer greater than or equal to 1.",
+                    parent=dialog,
+                )
+                return
             if definition is not None:
                 support = current_support_map.get(definition.comp_type)
                 allowed_macros = support.supported_macros if support is not None else set()
@@ -9704,6 +9832,18 @@ class ValidatorApp:
                             component_name,
                             current_ec_comp_type or "<unset>",
                             ", ".join(invalid_macros),
+                        ),
+                        parent=dialog,
+                    )
+                    return
+                if support is not None and support.channel_count is not None and parsed_ch_id > support.channel_count:
+                    messagebox.showerror(
+                        "Invalid channel",
+                        "CH_ID {} is out of range for {} on {}. Allowed channels: 1..{}.".format(
+                            parsed_ch_id,
+                            component_name,
+                            current_ec_comp_type or "<unset>",
+                            support.channel_count,
                         ),
                         parent=dialog,
                     )
@@ -10863,6 +11003,82 @@ class ValidatorApp:
 
     def _move_selected_object_down(self) -> None:
         self._move_selected_object(1)
+
+    def _macro_assignment_for_copy(self, key: str, value: str) -> str:
+        cleaned_key = str(key).strip()
+        cleaned_value = str(value)
+        quoted_value = _quote_startup_value(cleaned_value)
+        if cleaned_value == "" and quoted_value == "":
+            quoted_value = "''"
+        return "{}={}".format(cleaned_key, quoted_value)
+
+    def _macro_sections_for_object(self, obj: StartupObject) -> List[Tuple[str, List[Tuple[str, str]]]]:
+        sections: List[Tuple[str, List[Tuple[str, str]]]] = []
+        if obj.kind == "macro":
+            detail_map = dict(obj.details)
+            macro_name = detail_map.get("NAME", "").strip()
+            macro_value = detail_map.get("VALUE", "")
+            if macro_name:
+                sections.append(("macro", [(macro_name, macro_value)]))
+            return sections
+
+        command_macros = list(self._current_object_macro_map(obj).items())
+        if command_macros:
+            sections.append(("command", command_macros))
+        if obj.linked_file_details:
+            sections.append(("linked", list(obj.linked_file_details)))
+        return sections
+
+    def _selected_object_subtree_macro_text(self) -> Optional[Tuple[int, str]]:
+        from tkinter import messagebox
+
+        selected_info = self._selected_object_items()
+        if not selected_info:
+            messagebox.showinfo("Invalid selection", "Select one or more object nodes to copy macros.")
+            return None
+
+        all_subtree_objects: List[StartupObject] = []
+        seen_keys: Set[Tuple[Path, int, str, str]] = set()
+        for root_item, _root_obj in selected_info:
+            for obj in self._collect_subtree_objects(root_item):
+                object_key = self._object_tree_key(obj)
+                if object_key in seen_keys:
+                    continue
+                seen_keys.add(object_key)
+                all_subtree_objects.append(obj)
+
+        rendered_lines: List[str] = []
+        section_count = 0
+        single_object = len(all_subtree_objects) == 1
+        for obj in sorted(all_subtree_objects, key=lambda item: (str(item.source), item.line, item.title)):
+            sections = self._macro_sections_for_object(obj)
+            for scope_name, pairs in sections:
+                rendered_pairs = [
+                    self._macro_assignment_for_copy(key, value)
+                    for key, value in pairs
+                    if str(key).strip()
+                ]
+                if not rendered_pairs:
+                    continue
+                if single_object and len(sections) == 1:
+                    rendered_lines.append(", ".join(rendered_pairs))
+                else:
+                    rendered_lines.append("{} | {}: {}".format(obj.title, scope_name, ", ".join(rendered_pairs)))
+                section_count += 1
+
+        if not rendered_lines:
+            messagebox.showinfo("No macros", "The selected object subtree does not contain any macros to copy.")
+            return None
+
+        return section_count, "\n".join(rendered_lines)
+
+    def _copy_selected_macros(self) -> None:
+        copied = self._selected_object_subtree_macro_text()
+        if copied is None:
+            return
+        section_count, text = copied
+        self._copy_text_to_clipboard(text)
+        self.status_var.set("Copied {} macro section(s)".format(section_count))
 
     def _selected_object_subtree_text(self) -> Optional[Tuple[List[StartupObject], str]]:
         from tkinter import messagebox
