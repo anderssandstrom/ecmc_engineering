@@ -7,3 +7,6 @@
 [submodule "ecmc"]
 	path = ecmc
 	url = https://github.com/epics-modules/ecmc.git
+[submodule "ecmc_cfg_tool"]
+	path = ecmc_cfg_tool
+	url = git@github.com:anderssandstrom/ecmc_cfg_tool.git

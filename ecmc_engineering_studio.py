@@ -13,7 +13,9 @@ from typing import Dict, List, Optional, Set, Tuple
 import argparse
 import json
 import re
+import subprocess
 import sys
+import tempfile
 import time
 from functools import lru_cache
 from datetime import datetime
@@ -3962,6 +3964,8 @@ class ValidatorApp:
         self.editor_file_var = tk.StringVar(value="(no file selected)")
         self.editor_search_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready")
+        self.online_ioc_prefix_var = tk.StringVar(value="")
+        self.online_ssh_host_var = tk.StringVar(value="")
         self.editor_auto_complete_var = tk.BooleanVar(value=True)
         self.editor_macro_hover_var = tk.BooleanVar(value=True)
         self.tree_view_mode_var = tk.StringVar(value="Flow")
@@ -4100,6 +4104,150 @@ class ValidatorApp:
         if initial_startup is not None:
             self._open_startup(initial_startup.resolve(), validate_now=False)
 
+    def _open_online_tools(self) -> None:
+        from tkinter import messagebox
+
+        tk, ttk = self.tk, self.ttk
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Online IOC Tools")
+        dialog.transient(self.root)
+        dialog.columnconfigure(1, weight=1)
+        ttk.Label(dialog, text="IOC prefix").grid(row=0, column=0, padx=8, pady=8, sticky=tk.W)
+        prefix_entry = ttk.Entry(dialog, textvariable=self.online_ioc_prefix_var, width=40)
+        prefix_entry.grid(row=0, column=1, padx=8, pady=8, sticky=tk.EW)
+        ttk.Label(dialog, text="SSH host (optional)").grid(row=1, column=0, padx=8, pady=8, sticky=tk.W)
+        ttk.Entry(dialog, textvariable=self.online_ssh_host_var, width=40).grid(
+            row=1, column=1, padx=8, pady=8, sticky=tk.EW
+        )
+        ttk.Label(
+            dialog,
+            text="Open the live IOC navigator in a separate window.\n"
+                 "Select an IOC object there to open its tuning and diagnostic tools.",
+            justify=tk.LEFT,
+        ).grid(row=2, column=0, columnspan=2, padx=8, pady=8, sticky=tk.W)
+
+        def launch(demo: bool = False) -> None:
+            prefix = self.online_ioc_prefix_var.get().strip()
+            if not demo and (not prefix or prefix.startswith("-")):
+                messagebox.showerror("IOC prefix required", "Enter an IOC prefix, for example IOC:ECMC.", parent=dialog)
+                return
+            if self._launch_online_navigator(prefix, self.online_ssh_host_var.get().strip(), demo):
+                dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=3, column=0, columnspan=2, padx=8, pady=8, sticky=tk.E)
+        ttk.Button(buttons, text="Demo", command=lambda: launch(True)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(buttons, text="Open Navigator", command=launch).pack(side=tk.LEFT, padx=4)
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=4)
+        prefix_entry.focus_set()
+
+    def _launch_online_navigator(self, prefix: str, ssh_host: str, demo: bool = False) -> bool:
+        return self._launch_online_tool(
+            "start_ioc.sh", ["--demo"] if demo else [prefix, ssh_host],
+            "IOC navigator ({})".format("demo" if demo else prefix),
+        )
+
+    def _open_selected_online_tool(self, script: str, title: str) -> None:
+        from tkinter import messagebox
+
+        selected = self._selected_object_item()
+        if selected is None:
+            return
+        obj = selected[1]
+        details = dict(obj.details)
+        is_sdo = script == "start_sdo.sh"
+        tk, ttk = self.tk, self.ttk
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.columnconfigure(1, weight=1)
+        ttk.Label(dialog, text=obj.title, wraplength=460).grid(
+            row=0, column=0, columnspan=2, padx=8, pady=8, sticky=tk.W
+        )
+        target_id = tk.StringVar(value=(
+            str(obj.slave_id) if obj.slave_id is not None else details.get("SLAVE_ID", "")
+        ) if is_sdo else details.get("AXIS_ID", ""))
+        master_id = tk.StringVar(value=details.get("MASTER_ID", ""))
+        fields = [("SSH host" if is_sdo else "IOC prefix",
+                   self.online_ssh_host_var if is_sdo else self.online_ioc_prefix_var),
+                  ("Slave position" if is_sdo else "Axis ID", target_id)]
+        if is_sdo:
+            fields.append(("EtherCAT master ID", master_id))
+        for row, (label, variable) in enumerate(fields, 1):
+            ttk.Label(dialog, text=label).grid(row=row, column=0, padx=8, pady=6, sticky=tk.W)
+            ttk.Entry(dialog, textvariable=variable, width=40).grid(row=row, column=1, padx=8, pady=6, sticky=tk.EW)
+        ttk.Label(dialog, text="Check the live target before opening the tool.").grid(
+            row=4, column=0, columnspan=2, padx=8, pady=8, sticky=tk.W
+        )
+
+        def launch() -> None:
+            connection = fields[0][1].get().strip()
+            identifier = target_id.get().strip()
+            master = master_id.get().strip()
+            ids = [identifier, master] if is_sdo else [identifier]
+            if not connection or connection.startswith("-") or any(
+                not re.fullmatch(r"[0-9]+", value) for value in ids
+            ):
+                messagebox.showerror(
+                    "Invalid online target",
+                    "Enter a connection target and non-negative integer IDs.\n"
+                    "Resolve any project macros before opening the tool.", parent=dialog,
+                )
+                return
+            arguments = [connection, master, identifier] if is_sdo else [connection, identifier]
+            if self._launch_online_tool(script, arguments, title):
+                dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=5, column=0, columnspan=2, padx=8, pady=8, sticky=tk.E)
+        ttk.Button(buttons, text="Open Tool", command=launch).pack(side=tk.LEFT, padx=4)
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=4)
+
+    def _launch_online_tool(self, script: str, arguments: List[str], title: str) -> bool:
+        from tkinter import messagebox
+
+        launcher = _repository_root() / "ecmc_cfg_tool" / script
+        if not launcher.is_file():
+            messagebox.showerror(
+                "Online tools unavailable",
+                "Initialize the online tools from the repository root:\n"
+                "git submodule update --init --recursive",
+                parent=self.root,
+            )
+            return False
+        command = ["bash", str(launcher)] + arguments
+        output = None
+        try:
+            # A file avoids blocking the child on a full output pipe.
+            output = tempfile.TemporaryFile(mode="w+b")
+            process = subprocess.Popen(command, cwd=str(launcher.parent), stdout=output, stderr=subprocess.STDOUT)
+        except OSError as exc:
+            if output is not None:
+                output.close()
+            messagebox.showerror("Online tools could not start", str(exc), parent=self.root)
+            return False
+
+        self.status_var.set("Started {}".format(title))
+
+        def check_exit() -> None:
+            return_code = process.poll()
+            if return_code is None:
+                self.root.after(500, check_exit)
+                return
+            output.seek(0)
+            details = output.read(16000).decode("utf-8", errors="replace").strip()
+            output.close()
+            if return_code:
+                self.status_var.set("{} exited with error {}".format(title, return_code))
+                messagebox.showerror(
+                    "Online tools exited with an error",
+                    details or "Process exited with code {}".format(return_code),
+                    parent=self.root,
+                )
+
+        self.root.after(500, check_exit)
+        return True
+
     def _configure_ui_style(self) -> None:
         style = self.ttk.Style()
         try:
@@ -4173,7 +4321,20 @@ class ValidatorApp:
         ttk.Button(top, text="Validate", style="Toolbar.TButton", command=self._validate_current_project).grid(row=0, column=7)
         self.log_toggle_button = ttk.Button(top, text="Results", style="Toolbar.TButton", command=self._show_latest_results)
         self.log_toggle_button.grid(row=0, column=8, padx=(6, 0))
+        ttk.Button(top, text="Online Tools...", style="Toolbar.TButton", command=self._open_online_tools).grid(
+            row=1, column=7, columnspan=2, padx=(6, 0), pady=(6, 0), sticky=tk.E
+        )
         ttk.Label(top, textvariable=self.inventory_var, style="HeaderNote.TLabel").grid(row=1, column=1, sticky=tk.W, padx=6, pady=(6, 0))
+        ttk.Button(top, text="New Startup...", style="Toolbar.TButton", command=self._new_startup).grid(
+            row=1, column=2, columnspan=2, pady=(6, 0), sticky=tk.W
+        )
+        add_button = ttk.Menubutton(top, text="Add...", style="Toolbar.TButton")
+        add_menu = tk.Menu(add_button, tearoff=0)
+        for label, kind in [("Require", "require"), ("Slave", "slave"), ("Axis", "axis"),
+                            ("Macro", "macro"), ("PLC", "plc")]:
+            self._add_startup_menu_item(add_menu, label, kind)
+        add_button.configure(menu=add_menu)
+        add_button.grid(row=1, column=4, pady=(6, 0), sticky=tk.W)
         top.columnconfigure(1, weight=1)
 
         center = ttk.Panedwindow(self.root, orient=tk.VERTICAL)
@@ -6681,6 +6842,33 @@ class ValidatorApp:
                 self._populate_param_tree_for_entry(*entry)
                 self._refresh_context_panel(entry)
 
+    def _new_startup(self) -> bool:
+        from tkinter import filedialog, messagebox
+
+        picked = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Create ecmc startup file",
+            initialfile="startup.cmd",
+            defaultextension=".cmd",
+            filetypes=[("Startup files", "*.cmd *.script *.iocsh"), ("All files", "*")],
+        )
+        if not picked:
+            return False
+        path = Path(picked).expanduser().resolve()
+        try:
+            # New Startup must never overwrite an existing project.
+            with path.open("x", encoding="utf-8") as startup:
+                startup.write("# ecmc startup configuration\n")
+        except FileExistsError:
+            messagebox.showerror("File already exists", "Choose a new filename, or use Open for this file.", parent=self.root)
+            return False
+        except OSError as exc:
+            messagebox.showerror("Cannot create startup file", str(exc), parent=self.root)
+            return False
+        self._open_startup(path, validate_now=False)
+        self.status_var.set("Created {}. Use Add > Require, then Add > Slave to begin.".format(path.name))
+        return True
+
     def _browse_startup(self) -> None:
         from tkinter import filedialog
 
@@ -8950,6 +9138,7 @@ class ValidatorApp:
         entry_type = entry[0] if entry is not None else ""
 
         root_insert_items = [
+            ("Require", "require", None),
             ("Slave", "slave", None),
             ("Slave Config", "slave_config", None),
             ("Apply Config", "apply_config", None),
@@ -8970,6 +9159,7 @@ class ValidatorApp:
             ("EcDataItem", "ecdataitem", None),
         ]
         file_insert_items = [
+            ("Add Require", "require", False),
             ("Add Slave", "slave", False),
             ("Add Slave Config", "slave_config", False),
             ("Apply Config", "apply_config", False),
@@ -9028,6 +9218,25 @@ class ValidatorApp:
             self.startup_menu.add_cascade(label="Add Child", menu=child_menu)
         if selected_kind == "slave":
             self.startup_menu.add_command(label="Available EC Entries", command=self._show_selected_slave_ec_entries)
+
+        online_actions = []
+        if selected_kind in {"axis", "configured_axis"}:
+            online_actions = [
+                ("Axis Configuration", "start_axis.sh"),
+                ("Controller Tuning", "start_cntrl.sh"),
+                ("Motion", "start_mtn.sh"),
+                ("ISO230", "start_iso230.sh"),
+            ]
+        elif selected_kind == "slave":
+            online_actions = [("SDO Browser", "start_sdo.sh")]
+        if online_actions:
+            online_menu = self.tk.Menu(self.startup_menu, tearoff=0)
+            for title, script in online_actions:
+                online_menu.add_command(
+                    label=title,
+                    command=lambda script=script, title=title: self._open_selected_online_tool(script, title),
+                )
+            self.startup_menu.add_cascade(label="Online Tools", menu=online_menu)
 
         self._add_startup_menu_position_group(self.startup_menu, "Insert", root_insert_items)
 
@@ -10729,18 +10938,8 @@ class ValidatorApp:
         return (startup_file.resolve().parent / candidate).resolve()
 
     def _starter_file_content(self, kind: str) -> str:
-        if kind == "axis":
-            return (
-                "axis:\n"
-                "  id: ${AXIS_ID=1}\n"
-                "  name: ${AX_NAME=M1}\n"
-            )
-        if kind == "encoder":
-            return (
-                "encoder:\n"
-                "  type: incremental\n"
-                "  description: Placeholder encoder\n"
-            )
+        if kind in {"axis", "encoder"}:
+            return (_repository_root() / "templates" / (kind + ".yaml")).read_text(encoding="utf-8")
         if kind == "plc":
             return (
                 "# Starter PLC file\n"
@@ -10785,8 +10984,11 @@ class ValidatorApp:
 
         entry = self._selected_startup_entry()
         if entry is None:
-            messagebox.showinfo("No selection", "Select a startup object first.")
-            return
+            if not self.startup_var.get().strip():
+                if not self._new_startup():
+                    return
+            startup_path = Path(self.startup_var.get().strip()).expanduser().resolve()
+            entry = ("file", StartupFileNode(startup_path, None, 0))
 
         selected_kind = self._selected_object_kind()
         if kind == "component" and selected_kind != "slave":

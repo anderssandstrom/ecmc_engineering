@@ -1,0 +1,6 @@
+require ecmccfg "MASTER_ID=0"
+${SCRIPTEXEC} ${ecmccfg_DIR}addSlave.cmd "HW_DESC=EL7211-9014, SLAVE_ID=0"
+${SCRIPTEXEC} ${ecmccfg_DIR}applyComponent.cmd "COMP=Motor-Beckhoff-AM8111-XFX1, EC_COMP_TYPE=EL7211_OCT, COMP_S_ID=0, CH_ID=1"
+${SCRIPTEXEC} ${ecmccfg_DIR}loadYamlAxis.cmd "FILE=./cfg/axis.yaml, AXIS_ID=1"
+${SCRIPTEXEC} ${ecmccfg_DIR}loadYamlEnc.cmd "FILE=./cfg/encoder.yaml"
+${SCRIPTEXEC} ${ecmccfg_DIR}loadPLCFile.cmd "FILE=./cfg/main.plc, PLC_ID=0"

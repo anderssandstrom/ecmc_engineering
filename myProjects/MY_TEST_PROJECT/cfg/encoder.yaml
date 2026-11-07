@@ -1,0 +1,29 @@
+# Additional-encoder starter based on ecmccfg/examples/PSI/best_practice/motion/
+# stepper_incremental/el7062/cfg/enc_inc.yaml and
+# stepper_bissc/el7041_el5042/cfg/enc_open_loop.yaml.
+# Set ENC_SID (and ENC_CH if needed) in loadYamlEnc.cmd.
+
+encoder:
+  desc: "Additional encoder"
+  unit: mm                            # Match the axis engineering unit
+  type: 0                             # 0: incremental, 1: absolute
+  numerator: 1.0                      # TODO: engineering units per revolution/distance
+  denominator: 1                      # TODO: counts for that revolution/distance
+  bits: 32                            # TODO: raw position bit count
+  absBits: 0                          # Set absolute bit count when type is 1
+  absOffset: 0.0
+  position: ec${ECMC_EC_MASTER_ID=0}.s${ENC_SID}.positionActual${ENC_CH=01}
+  # Adjust the entry name for the terminal (e.g. positionActual01_2 on EL7062).
+  # status: ec${ECMC_EC_MASTER_ID=0}.s${ENC_SID}.encoderStatus${ENC_CH=01}
+  # Add ready/warning/error bit indices only with a matching status entry.
+  # primary: true                     # Enable only when this is the control encoder
+
+  # Optional homing: choose the sequence and configure its inputs/latch first.
+  # homing:
+  #   type: 1
+  #   position: 0.0
+  #   velocity:
+  #     to: 1.0
+  #     from: 0.5
+  #   acceleration: 1.0
+  #   deceleration: 1.0

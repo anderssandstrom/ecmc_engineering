@@ -1,0 +1,1 @@
+# ecmc startup configuration

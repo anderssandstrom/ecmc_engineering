@@ -1,0 +1,82 @@
+# Physical-axis starter based on ecmccfg/examples/PSI/best_practice/motion/
+# servo/csv/cfg/axis.yaml and stepper_incremental/el7062/cfg/axis.yaml.
+# Configure scaling, motion limits and tuning for the actual hardware.
+# Set DRV_SID, ENC_SID, LIMIT_FWD and LIMIT_BWD in the startup command,
+# or replace the corresponding macros below with the required EtherCAT links.
+
+axis:
+  id: ${AXIS_ID=1}
+  type: 1                             # Physical axis
+  mode: CSV                           # CSV: velocity setpoint; CSP: position setpoint
+  tweakDist: 0.1
+
+epics:
+  name: ${AX_NAME=M1}
+  precision: 3
+  unit: mm                            # Set the engineering unit
+  motorRecord:
+    description: "Configure axis description"
+    enable: true
+    fieldInit: "RTRY=0,FOFF=Frozen"
+
+drive:
+  type: 1                             # 0: stepper, 1: DS402 (servo/advanced stepper)
+  numerator: 1.0                      # TODO: engineering velocity per raw range (CSV)
+  denominator: 1                      # TODO: raw drive range; position counts for CSP
+  setpoint: ec${ECMC_EC_MASTER_ID=0}.s${DRV_SID}.velocitySetpoint${DRV_CH=01}
+  control: ec${ECMC_EC_MASTER_ID=0}.s${DRV_SID}.driveControl${DRV_CH=01}
+  status: ec${ECMC_EC_MASTER_ID=0}.s${DRV_SID}.driveStatus${DRV_CH=01}
+  reset: 7                            # DS402 fault-reset bit; adapt for other drive types
+  # For type 0 also configure enable/enabled and any warning/error bits.
+  # For CSP change setpoint to positionSetpoint and adapt scaling.
+
+encoder:
+  desc: "Primary encoder"
+  type: 0                             # 0: incremental, 1: absolute
+  numerator: 1.0                      # TODO: engineering units per revolution/distance
+  denominator: 1                      # TODO: counts for that revolution/distance
+  bits: 32                            # TODO: raw position bit count
+  absBits: 0                          # Set absolute bit count when type is 1
+  absOffset: 0.0
+  position: ec${ECMC_EC_MASTER_ID=0}.s${ENC_SID}.positionActual${ENC_CH=01}
+  # status: ec${ECMC_EC_MASTER_ID=0}.s${ENC_SID}.encoderStatus${ENC_CH=01}
+
+controller:
+  Kp: 1.0                             # TODO: tune for the configured axis
+  Ki: 0.0
+  Kd: 0.0
+
+trajectory:
+  type: 1
+  axis:
+    velocity: 1.0                     # Engineering units / second
+    acceleration: 1.0
+    deceleration: 1.0
+    emergencyDeceleration: 2.0
+    jerk: 10.0
+  jog:
+    velocity: 0.1
+
+input:
+  limit:
+    forward: ${LIMIT_FWD}             # Full EtherCAT entry including bit, if applicable
+    backward: ${LIMIT_BWD}
+  # home: <EtherCAT home-switch entry>
+  # interlock: <EtherCAT interlock entry>
+
+softlimits:
+  enable: false                       # Configure travel range and enable when appropriate
+  forwardEnable: false
+  backwardEnable: false
+  forward: 1.0
+  backward: -1.0
+
+monitoring:
+  lag:
+    enable: true
+    tolerance: 0.1                    # TODO: following-error tolerance in engineering units
+    time: 100
+  target:
+    enable: true                      # Required for motor-record completion detection
+    tolerance: 0.01
+    time: 100
