@@ -11,7 +11,7 @@ axis:
   tweakDist: 0.1
   autoEnable:
     enableTimeout: 2.0
-    disableTimout: 2.0
+    disableTimeout: 2.0
 
 epics:
   name: ${AX_NAME=M1}
