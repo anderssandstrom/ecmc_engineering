@@ -1,3 +1,8 @@
 # Starter PLC file
 VAR
+
 END_VAR
+static.counter+=1;
+if($(SELF).dbg){
+  println('HEPP: ', static.counter);
+}

@@ -10,3 +10,6 @@
 [submodule "ecmc_cfg_tool"]
 	path = ecmc_cfg_tool
 	url = git@github.com:anderssandstrom/ecmc_cfg_tool.git
+[submodule "ecmc_podman"]
+	path = ecmc_podman
+	url = git@github.com:anderssandstrom/ecmc_podman.git

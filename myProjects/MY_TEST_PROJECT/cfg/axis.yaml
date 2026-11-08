@@ -9,6 +9,9 @@ axis:
   type: 1                             # Physical axis
   mode: CSV                           # CSV: velocity setpoint; CSP: position setpoint
   tweakDist: 0.1
+  autoEnable:
+    enableTimeout: 2.0
+    disableTimout: 2.0
 
 epics:
   name: ${AX_NAME=M1}
@@ -20,9 +23,9 @@ epics:
     fieldInit: "RTRY=0,FOFF=Frozen"
 
 drive:
-  type: 1                             # 0: stepper, 1: DS402 (servo/advanced stepper)
-  numerator: 1.0                      # TODO: engineering velocity per raw range (CSV)
-  denominator: 1                      # TODO: raw drive range; position counts for CSP
+  type: 1                              # 0: stepper, 1: DS402 (servo/advanced stepper)
+  numerator: 8000                      # TODO: engineering velocity per raw range (CSV)
+  denominator: 2147483648                      # TODO: raw drive range; position counts for CSP
   setpoint: ec${ECMC_EC_MASTER_ID=0}.s${DRV_SID}.velocitySetpoint${DRV_CH=01}
   control: ec${ECMC_EC_MASTER_ID=0}.s${DRV_SID}.driveControl${DRV_CH=01}
   status: ec${ECMC_EC_MASTER_ID=0}.s${DRV_SID}.driveStatus${DRV_CH=01}
@@ -33,10 +36,10 @@ drive:
 encoder:
   desc: "Primary encoder"
   type: 0                             # 0: incremental, 1: absolute
-  numerator: 1.0                      # TODO: engineering units per revolution/distance
-  denominator: 1                      # TODO: counts for that revolution/distance
+  numerator: 1                      # TODO: engineering units per revolution/distance
+  denominator: 1048576                      # TODO: counts for that revolution/distance
   bits: 32                            # TODO: raw position bit count
-  absBits: 0                          # Set absolute bit count when type is 1
+  absBits: 32                          # Set absolute bit count when type is 1
   absOffset: 0.0
   position: ec${ECMC_EC_MASTER_ID=0}.s${ENC_SID}.positionActual${ENC_CH=01}
   # status: ec${ECMC_EC_MASTER_ID=0}.s${ENC_SID}.encoderStatus${ENC_CH=01}
@@ -59,8 +62,8 @@ trajectory:
 
 input:
   limit:
-    forward: ${LIMIT_FWD}             # Full EtherCAT entry including bit, if applicable
-    backward: ${LIMIT_BWD}
+    forward: ec${ECMC_EC_MASTER_ID=0}.s${ENC_SID}.ONE.0             # Full EtherCAT entry including bit, if applicable
+    backward: ec${ECMC_EC_MASTER_ID=0}.s${ENC_SID}.ONE.0 
   # home: <EtherCAT home-switch entry>
   # interlock: <EtherCAT interlock entry>
 
