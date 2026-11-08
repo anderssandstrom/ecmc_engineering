@@ -35,6 +35,7 @@ git submodule update --init --recursive
 - `ecmccomp/`: submodule with supported component definitions
 - `ecmc/`: submodule used for ECMC command parsing and command help
 - `ecmc_cfg_tool/`: submodule with the live IOC navigator and online configuration, tuning, and diagnostic tools
+- `ecmc_podman/`: submodule with the Podman simulation runtime, image builder, and IOC simulation launcher
 - `examples/`: local example startup files and configs for the studio itself
 
 ## Start
@@ -123,15 +124,15 @@ project files.
 
 The migration is still in progress. The Tk application below retains specialised
 command-building and assistance features not yet ported. See
-[Qt migration status](docs/qt-migration.md). Controller hardware import and Podman
-simulation controls are not implemented yet.
+[Qt migration status](docs/qt-migration.md). Controller hardware import is not
+implemented yet.
 The launcher uses the same Qt Python selection as the online tools, including
 the `ECMC_PYTHON` override.
 
 Run the Qt regression checks using a Python environment with Qt installed:
 
 ```bash
-python -m unittest -v test_engineering_qt
+python -m unittest -v test_engineering_qt test_simulation_qt
 ```
 
 ### Existing Tk workspace
@@ -153,6 +154,50 @@ You can also start without `--startup` and open a file from the GUI afterwards:
 ```bash
 python ecmc_engineering_studio.py
 ```
+
+## Simulation Runtime
+
+The `ecmc_podman` submodule provides the runtime for IOC simulations. Initialize
+it in an existing checkout with:
+
+```bash
+git submodule update --init --recursive
+```
+
+Its upstream URL uses GitHub SSH access. With Podman installed and running, use
+the scripts from the engineering repository root:
+
+```bash
+./ecmc_podman/build-image.sh
+./ecmc_podman/run-sim.sh --ioc-name SIMIOC /path/to/project/IOC_startup.cmd
+```
+
+See [the simulation runtime documentation](ecmc_podman/readme.md) for setup,
+module versions, and Python hardware models.
+
+In the **Qt engineering tool**, open your project and click **Simulate**. Choose
+the container image and whether to **Enable Python hardware simulation**, then
+click **Start**. With the default options this runs:
+
+```bash
+./ecmc_podman/run-sim.sh --image ecmc-dev:portable --ioc-name SIMIOC --hardware-sim /path/to/project/IOC_startup.cmd
+```
+
+Podman must be running and the `ecmc-dev:portable` image must be available.
+Unsaved project changes prompt you to **Save** or **Cancel** before launch. The
+startup directory (including `cfg/`) is mounted read-only into the container.
+
+The **Simulation — SIMIOC** tab provides IOC shell output and simulation logs.
+Type an IOC shell command such as `dbl` in the command field and press **Enter**
+or **Send**. **Stop Simulation** sends `exit` to the IOC and waits for the IOC and
+hardware models to shut down. Clicking **Simulate** while it is running returns
+you to this tab. The **×** button on the tab closes it; if the simulation is
+running, it sends `exit` and removes the tab once the process has stopped.
+
+**Open Online Tools** opens the IOC navigator in a separate window using
+`ecmc_cfg_tool/start_ioc.sh SIMIOC`, with Channel Access directed to localhost.
+Wait for IOC startup to finish before connecting. The simulation launcher publishes
+the local CA ports; only one simulation can run in this workspace at a time.
 
 ## Online IOC Tools
 
@@ -251,6 +296,24 @@ Object additions are written to the startup file immediately.
 The `ecmc_cfg_tool` submodule is needed when using the online tools described above.
 
 ## Notes
+
+On macOS, if caQtDM is installed in `/Applications`, this alias can be useful
+for launching it from a terminal. Add it to `~/.zshrc`:
+
+```bash
+alias caqtdm='/Applications/caQtDM.app/Contents/MacOS/caQtDM'
+```
+
+Shell aliases apply only to interactive terminals. The online tools find caQtDM
+on `PATH` or in `/Applications/caQtDM.app` (also `~/Applications` on macOS).
+For another installation, export `CAQTDM_EXECUTABLE` with the full executable path
+before starting the engineering tool.
+
+Panel lookup supports both installed and repository layouts: an explicit
+navigator `--caqtdm-dir` takes priority, followed by `ECMC_CAQTDM_DIR`, existing
+`CAQTDM_DISPLAY_PATH` and `EPICS_DISPLAY_PATH` directories, then this checkout's
+`ecmccfg/qt`. The selected panel's directory is added to the launched process's
+display paths so embedded panels can be found too.
 
 - The tool reads startup scripts, linked YAML/PLC files, `ecmccfg` hardware data, `ecmccomp` component metadata, and ECMC command information from the submodules.
 - On some Python installations, `tkinter` is missing. In that case the GUI will not start until Tk support is installed.

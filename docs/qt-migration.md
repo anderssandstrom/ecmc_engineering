@@ -51,7 +51,10 @@ remains available throughout migration.
 
 ## Later integration
 
-Controller slave discovery/import and Podman simulation are separate follow-up
-features. Simulation should use compatible ECMC/ecmccfg revisions supporting
-`SIM=1`, with the existing Python hardware models as needed. The currently pinned
-configuration library must be checked before enabling that workflow.
+The Qt **Simulate** button launches the current saved startup file through
+`ecmc_podman/run-sim.sh`, using `ecmc-dev:portable`, IOC name `SIMIOC`, and
+`--hardware-sim`. The Simulation tab exposes logs and an IOC shell command field,
+graceful stop, and **Open Online Tools** for a localhost IOC navigator. Regression
+tests cover launch arguments, save handling, console I/O, and online-tool routing
+without starting a real container. Runtime validation against a real image is
+still needed. Controller slave discovery/import remains a follow-up feature.

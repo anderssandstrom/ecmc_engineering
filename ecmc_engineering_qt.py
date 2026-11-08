@@ -10,6 +10,7 @@ from qt_compat import QtCore, QtGui, QtWidgets
 import ecmc_engineering_studio as core
 from ecmc_object_editor_qt import ObjectEditingMixin, OBJECT_ROLE, ROW_ROLE
 from ecmc_ioc_project import create_ioc_project, parameters_path
+from ecmc_simulation_qt import SimulationConsole, SimulationOptionsDialog, simulation_command
 
 
 class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
@@ -25,6 +26,7 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
         self.undo_objects, self.redo_objects = [], []
         self.online_prefix = "IOC:ECMC"
         self.online_host = ""
+        self.simulation_console = None
         self.inventory = core._build_repository_inventory(core._find_ecmccfg_root())
         self.setWindowTitle("ecmc Engineering Studio — Qt preview")
         self.resize(1250, 850)
@@ -65,6 +67,10 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
         add.setMenu(menu)
         toolbar.addWidget(add)
         toolbar.addStretch()
+        simulate = QtWidgets.QPushButton("Simulate")
+        simulate.setToolTip("Choose simulation options and run the current project as SIMIOC")
+        simulate.clicked.connect(self.simulate_project)
+        toolbar.addWidget(simulate)
         online = QtWidgets.QPushButton("Connect / Demo…")
         online.clicked.connect(self.open_online)
         toolbar.addWidget(online)
@@ -487,6 +493,66 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
     def add_slave(self):
         self.add_object("slave")
 
+    def simulate_project(self):
+        if self.simulation_console is not None and self.simulation_console.is_running():
+            self.tabs.setCurrentWidget(self.simulation_console)
+            self.statusBar().showMessage("A simulation is already running. Stop it before starting another project.")
+            return
+        if self.startup is None:
+            self.error("Open or create an IOC project before starting a simulation.")
+            return
+        try:
+            command = simulation_command(self.startup, Path(__file__).resolve().parent)
+        except ValueError as exc:
+            self.error(exc)
+            return
+        if any(text != self.saved[path] for path, text in self.buffers.items()):
+            choice = QtWidgets.QMessageBox.question(
+                self, "Save before simulation", "Save all project changes before running the simulation?",
+                QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Cancel, QtWidgets.QMessageBox.Save,
+            )
+            if choice != QtWidgets.QMessageBox.Save or not self.save_all():
+                return
+        options = SimulationOptionsDialog(self)
+        if options.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        try:
+            command = simulation_command(self.startup, Path(__file__).resolve().parent,
+                                         options.image.text(), options.hardware_sim.isChecked())
+        except ValueError as exc:
+            self.error(exc)
+            return
+        console = SimulationConsole(command, self.startup.parent, self)
+        if self.simulation_console is not None:
+            old = self.simulation_console
+            self.tabs.removeTab(self.tabs.indexOf(old))
+            old.deleteLater()
+        self.simulation_console = console
+        self.tabs.setCurrentIndex(self.tabs.addTab(console, "Simulation — SIMIOC"))
+        close_button = QtWidgets.QToolButton(self.tabs)
+        close_button.setText("×")
+        close_button.setToolTip("Close simulation tab (stops a running IOC)")
+        close_button.setAccessibleName("Close simulation tab")
+        close_button.clicked.connect(self.close_simulation_tab)
+        self.tabs.tabBar().setTabButton(self.tabs.indexOf(console), QtWidgets.QTabBar.RightSide, close_button)
+        console.start()
+
+    def close_simulation_tab(self):
+        console = self.simulation_console
+        if console is None:
+            return
+        if console.is_running():
+            if not getattr(console, "close_when_stopped", False):
+                console.close_when_stopped = True
+                console.process.stateChanged.connect(
+                    lambda state: QtCore.QTimer.singleShot(0, self.close_simulation_tab)
+                    if state == QtCore.QProcess.NotRunning else None)
+            console.request_stop()
+            return
+        self.tabs.removeTab(self.tabs.indexOf(console))
+        self.simulation_console = None
+        console.deleteLater()
+
     def project_online_host(self):
         """Prefer the current parameters buffer over the session's manual host."""
         if self.startup:
@@ -539,6 +605,7 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
                         event.ignore()
                         return
                 if not tab.close():
+                    self.tabs.setCurrentWidget(tab)
                     event.ignore()
                     return
             event.accept()
