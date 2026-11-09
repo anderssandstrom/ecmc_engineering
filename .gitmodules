@@ -1,6 +1,6 @@
 [submodule "ecmccfg"]
 	path = ecmccfg
-	url = https://github.com/paulscherrerinstitute/ecmccfg.git
+	url = https://github.com/anderssandstrom/ecmccfg.git
 [submodule "ecmccomp"]
 	path = ecmccomp
 	url = https://github.com/paulscherrerinstitute/ecmccomp.git
