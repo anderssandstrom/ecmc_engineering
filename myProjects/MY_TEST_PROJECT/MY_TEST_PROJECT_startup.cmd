@@ -1,4 +1,5 @@
 require ecmccfg "MASTER_ID=0"
+#require ecb
 ${SCRIPTEXEC} ${ecmccfg_DIR}addSlave.cmd "HW_DESC=EL7211-9014, SLAVE_ID=0"
 ${SCRIPTEXEC} ${ecmccfg_DIR}applyComponent.cmd "COMP=Motor-Beckhoff-AM8111-XFX1, EC_COMP_TYPE=EL7211_OCT, COMP_S_ID=0, CH_ID=1"
 epicsEnvSet("DRV_SID", "$(ECMC_EC_SLAVE_NUM)")
