@@ -32,7 +32,7 @@ for panel in "${panels[@]}"; do
     [[ -f ecmc${panel}.ui ]] || { echo "Missing display: ecmc${panel}.ui" >&2; exit 1; }
 done
 for i in 0 1 2 3 4 5 6; do
-    cmd=("$binary" -macro "IOC=SIMSLIT,SYS=SIMSLIT,MasterID=0,SlaveID=${ids[$i]},HWType=${types[$i]},CH2_OFF=0" "ecmc${panels[$i]}.ui")
+    cmd=("$binary" -macro "IOC=SIMSLIT,SYS=SIMSLIT,MasterID=0,SlaveID=${ids[$i]},HWType=${types[$i]},CH2_OFF=0,PANEL=${panels[$i]}" "ecmcGenericSlaveOverview.ui")
     if ((dry)); then
         printf 'EPICS_CA_AUTO_ADDR_LIST=NO EPICS_CA_ADDR_LIST=127.0.0.1 '
         printf '%q ' "${cmd[@]}"
