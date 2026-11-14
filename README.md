@@ -253,6 +253,46 @@ To select a particular Python environment, use
 same interpreter. Stop any other IOC using the published local CA ports before
 launching. For separate IOC and test terminals, follow the manual steps below.
 
+### Open caQtDM axis panels
+
+With the slit IOC running, open all four simulation axes:
+
+```bash
+./start_slit_axes_caqtdm.sh
+```
+
+This opens TR_LO (5), TR_HI (6), CENTERY (12), and GAPY (13) using
+`SIMSLIT:` and localhost Channel Access. For one axis, pass its name and ID:
+
+```bash
+./start_axis_caqtdm.sh TR_LO 5
+./start_axis_caqtdm.sh --ioc MYIOC --dev MYDEVICE --address 192.168.1.10 M1 1
+```
+
+The single-axis launcher defaults to IOC/device prefix `SIMSLIT`; `--dev`
+defaults to the selected IOC. Its address defaults to `EPICS_CA_ADDR_LIST` or
+localhost. Both scripts locate displays relative to the repository and find
+caQtDM on PATH or in `/Applications/caQtDM.app`; set `CAQTDM_BIN` to override.
+Use `--dry-run` to inspect commands without opening windows. During automated
+tests, use panels only for observation. For manual motion, run the slit wrapper
+with `--plant-only`.
+
+### Open simulated hardware panels
+
+With the slit IOC running, open caQtDM panels for all seven configured terminals:
+
+```bash
+./start_slit_hardware_caqtdm.sh
+```
+
+This opens EK1100 (0), EL2008 (5), EL5042 (9), EL7031 (12), EL7041-0052 (14),
+EL7062_OPT (20), and EL2252 (21) for `SIMSLIT:`, master 0, on localhost.
+The launcher uses the option-driven two-channel panel for EL7062_OPT.
+It opens status/control displays only; it does not start another plant or
+simulator. Use panels for observation during automated tests. For manual
+interaction, keep `./run_slit_tests.py --plant-only` running.
+`CAQTDM_BIN` overrides the executable; `--dry-run` prints all launch commands.
+
 ### Start the slit IOC
 
 In the first terminal:
