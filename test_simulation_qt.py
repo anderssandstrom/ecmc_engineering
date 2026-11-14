@@ -36,13 +36,19 @@ class SimulationTests(unittest.TestCase):
 
     def test_launcher_arguments_and_real_script_dry_run(self):
         command = simulation_command(self.startup, Path(__file__).resolve().parent)
-        self.assertEqual(command[2:], ['--image', 'ecmc-dev:portable', '--ioc-name', 'SIMIOC', '--hardware-sim', str(self.startup)])
+        self.assertEqual(command[2:], ['--image', 'ecmc-dev:local', '--ioc-name', 'SIMIOC', '--local-sources', '--hardware-sim', str(self.startup)])
         result = subprocess.run(command[:2] + ['--dry-run'] + command[2:], text=True, capture_output=True, check=True)
-        self.assertIn('ecmc-dev:portable', result.stdout)
+        self.assertIn('ecmc-dev:local', result.stdout)
         self.assertIn('RUN_SIM_IOC_NAME=SIMIOC', result.stdout)
         self.assertIn('RUN_SIM_HARDWARE=1', result.stdout)
         self.assertIn(':/config:ro', result.stdout)
         self.assertIn('./test_startup.cmd', result.stdout)
+
+    def test_prebuilt_image_can_be_selected(self):
+        command = simulation_command(self.startup, Path(__file__).resolve().parent,
+                                     image='ecmc-dev:portable', local_sources=False)
+        self.assertNotIn('--local-sources', command)
+        self.assertIn('ecmc-dev:portable', command)
 
     def test_missing_runtime_is_reported(self):
         with self.assertRaisesRegex(ValueError, 'runtime is missing'):
