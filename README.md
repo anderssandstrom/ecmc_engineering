@@ -392,6 +392,17 @@ scripts inherit it. The wrapper forwards all arguments to
 
 ## Open the caQtDM main panel
 
+On non-PSI systems, make the panels and helper files in `ecmccfg/qt`
+accessible at **`/ioc/modules/qt`**, for example through a symlink to that
+directory. Some panel actions use this absolute installation path to launch
+other panels or helper scripts. Opening a panel directly from the checkout
+does not guarantee that all of its launch buttons will work.
+
+The **hardware overview may not work yet** outside the PSI environment:
+its `start_ecmc_overview.py` helper lives in a separate repository and is not
+provided by `ecmccfg/qt`. That helper and its dependencies must also be installed
+and discoverable by the launcher.
+
 Pass the IOC prefix to the generic main-panel launcher:
 
 ```bash
