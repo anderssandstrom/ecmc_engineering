@@ -13,14 +13,8 @@ case "${1:-}" in
 esac
 (($# == 0)) || { echo 'Expected only optional --dry-run' >&2; exit 1; }
 fail() { echo "slit-hardware: $*" >&2; exit 1; }
-binary=${CAQTDM_BIN:-}
-if [[ -z $binary ]]; then
-    if command -v caqtdm >/dev/null 2>&1; then binary=$(command -v caqtdm)
-    elif command -v caQtDM >/dev/null 2>&1; then binary=$(command -v caQtDM)
-    elif [[ -x /Applications/caQtDM.app/Contents/MacOS/caQtDM ]]; then
-        binary=/Applications/caQtDM.app/Contents/MacOS/caQtDM
-    else fail 'caQtDM not found; install it or set CAQTDM_BIN'; fi
-fi
+binary=caqtdm
+command -v "$binary" >/dev/null 2>&1 || fail 'caqtdm not found; add its executable or wrapper to PATH'
 export EPICS_CA_AUTO_ADDR_LIST=NO
 export EPICS_CA_ADDR_LIST=127.0.0.1
 export EPICS_DISPLAY_PATH="$here/ecmccfg/qt${EPICS_DISPLAY_PATH:+:$EPICS_DISPLAY_PATH}"

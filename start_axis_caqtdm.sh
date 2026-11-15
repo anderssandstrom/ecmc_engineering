@@ -17,7 +17,7 @@ Usage: start_axis_caqtdm.sh [options] AXIS_NAME AXIS_ID
 Examples:
   ./start_axis_caqtdm.sh TR_LO 5
   ./start_axis_caqtdm.sh --ioc MYIOC --dev MYDEVICE --address 192.168.1.10 M1 1
-Set CAQTDM_BIN to override the caQtDM executable.
+The caqtdm executable or wrapper must be on PATH.
 EOF
 }
 fail() { echo "start-axis: $*" >&2; exit 1; }
@@ -46,14 +46,8 @@ dev=${dev:-$ioc}
 for value in "$ioc" "$dev" "$axis"; do
     [[ -n $value && $value != *[[:space:],\;\=\$]* ]] || fail 'Prefixes and axis names must not contain whitespace or macro separators'
 done
-binary=${CAQTDM_BIN:-}
-if [[ -z $binary ]]; then
-    if command -v caqtdm >/dev/null 2>&1; then binary=$(command -v caqtdm)
-    elif command -v caQtDM >/dev/null 2>&1; then binary=$(command -v caQtDM)
-    elif [[ -x /Applications/caQtDM.app/Contents/MacOS/caQtDM ]]; then
-        binary=/Applications/caQtDM.app/Contents/MacOS/caQtDM
-    else fail 'caQtDM not found; install it or set CAQTDM_BIN'; fi
-fi
+binary=caqtdm
+command -v "$binary" >/dev/null 2>&1 || fail 'caqtdm not found; add its executable or wrapper to PATH'
 [[ -f $here/ecmccfg/qt/ecmcAxis.ui ]] || fail 'Missing axis display; initialize the ecmccfg submodule'
 export EPICS_CA_AUTO_ADDR_LIST=NO
 export EPICS_CA_ADDR_LIST=$address

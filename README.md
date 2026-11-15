@@ -271,8 +271,8 @@ This opens TR_LO (5), TR_HI (6), CENTERY (12), and GAPY (13) using
 
 The single-axis launcher defaults to IOC/device prefix `SIMSLIT`; `--dev`
 defaults to the selected IOC. Its address defaults to `EPICS_CA_ADDR_LIST` or
-localhost. Both scripts locate displays relative to the repository and find
-caQtDM on PATH or in `/Applications/caQtDM.app`; set `CAQTDM_BIN` to override.
+localhost. Both scripts locate displays relative to the repository and run `caqtdm` from
+PATH. On macOS, install the wrapper described below.
 Use `--dry-run` to inspect commands without opening windows. During automated
 tests, use panels only for observation. For manual motion, run the slit wrapper
 with `--plant-only`.
@@ -291,7 +291,7 @@ The launcher uses the option-driven two-channel panel for EL7062_OPT.
 It opens status/control displays only; it does not start another plant or
 simulator. Use panels for observation during automated tests. For manual
 interaction, keep `./run_slit_tests.py --plant-only` running.
-`CAQTDM_BIN` overrides the executable; `--dry-run` prints all launch commands.
+`caqtdm` must be on PATH; `--dry-run` prints all launch commands.
 
 ### Start the slit IOC
 
@@ -372,6 +372,37 @@ and [slit test suite documentation](ecmccfg/tests/integration/slit/README.md)
 for case groups, model behavior, and coverage limits. The local-source launcher
 and GUI have automated checks; a full container build and live slit acceptance
 run with these checkouts have not yet been verified.
+
+## macOS caQtDM command
+
+Linux installations keep using `caqtdm` from PATH. On macOS, install the small
+wrapper once from the engineering repository root:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+cp tools/macos/caqtdm "$HOME/.local/bin/caqtdm"
+chmod +x "$HOME/.local/bin/caqtdm"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` to keep it for new
+terminals. Launch the panels from a terminal with that PATH so their child
+scripts inherit it. The wrapper forwards all arguments to
+`/Applications/caQtDM.app/Contents/MacOS/caQtDM`.
+
+## Open the caQtDM main panel
+
+Pass the IOC prefix to the generic main-panel launcher:
+
+```bash
+./start_main_caqtdm.sh MYIOC
+# Local simulation:
+./start_main_caqtdm.sh --address 127.0.0.1 SIMSLIT
+```
+
+A trailing colon on the prefix is accepted. The Channel Access address defaults
+to `EPICS_CA_ADDR_LIST` when set, otherwise `127.0.0.1`, matching the axis
+launcher. Broadcast discovery is disabled; use `--address HOST` for a remote IOC. `caqtdm` is launched from PATH. Use `--dry-run` to inspect the command.
 
 ## Online IOC Tools
 
