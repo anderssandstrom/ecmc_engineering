@@ -27,6 +27,70 @@ cd ecmc_engineering
 git submodule update --init --recursive
 ```
 
+## Installation and requirements
+
+The supported host platforms are Linux and macOS. Windows is not currently
+supported directly because the simulation launchers use Bash, Unix paths and a
+Linux Podman container. Running the complete application inside WSL2 may work,
+but is not currently a tested or supported configuration.
+
+Install these base tools:
+
+- Python 3
+- Git and Bash
+- all Git submodules (`git submodule update --init --recursive`)
+- one Qt Python binding: `PyQt5` or `PySide6`
+
+For live IOC access and the embedded online navigator, also install one EPICS
+client backend:
+
+- `pyepics` (preferred), or
+- the EPICS `caget` and `caput` command-line tools on `PATH`
+
+The launcher does not create or modify a host Python environment. It uses
+`ECMC_PYTHON` when set, otherwise the first `python` or `python3` with a supported
+Qt binding. An optional isolated environment can be prepared with:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install PyQt5 pyepics
+export ECMC_PYTHON="$PWD/.venv/bin/python"
+```
+
+Use `PySide6` instead of `PyQt5` if preferred. The `.venv` directory is a local
+host environment and should not be committed.
+
+Simulation additionally requires:
+
+- Podman, installed and running
+- enough disk space for container images and build layers
+- approximately 8 GB of Podman VM memory when compiling on macOS
+
+On macOS, initialise and start the Podman Linux VM once:
+
+```bash
+podman machine init
+podman machine start
+```
+
+The simulation image creates its own `/opt/ecmc-python` virtual environment and
+installs the pinned packages from `ecmc_podman/container/requirements.txt` while
+the image is built. This is separate from the optional host environment above.
+
+Optional features require additional software:
+
+- caQtDM for graphical control panels
+- SSH for remote SDO access; the remote IOC host must provide its EtherCAT tools
+- Tkinter only for the legacy Tk workspace
+
+Start the Qt Studio after installing the applicable dependencies:
+
+```bash
+bash start_engineering_qt.sh
+```
+
 ## Repository Layout
 
 - `ecmc_engineering_studio.py`: main GUI application
