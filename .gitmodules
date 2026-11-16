@@ -1,12 +1,12 @@
 [submodule "ecmccfg"]
 	path = ecmccfg
-	url = https://github.com/paulscherrerinstitute/ecmccfg.git
+	url = https://github.com/anderssandstrom/ecmccfg.git
 [submodule "ecmccomp"]
 	path = ecmccomp
 	url = https://github.com/paulscherrerinstitute/ecmccomp.git
 [submodule "ecmc"]
 	path = ecmc
-	url = https://github.com/epics-modules/ecmc.git
+	url = https://github.com/anderssandstrom/ecmc.git
 [submodule "ecmc_cfg_tool"]
 	path = ecmc_cfg_tool
 	url = git@github.com:anderssandstrom/ecmc_cfg_tool.git
