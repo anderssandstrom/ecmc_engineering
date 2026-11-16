@@ -185,14 +185,19 @@ by default. With the default options this runs:
 ```
 
 Podman must be running. The first local-source launch builds `ecmc-dev:local`
-from the existing submodules, including local edits. Later launches reuse it
+from the existing submodules, including local edits, and may take several minutes
+while the modules compile. Later launches reuse it
 unless sources or build inputs change; changed inputs use cached build layers.
 The checkouts are left untouched. Uncheck the local-sources option and choose
 an existing image to run without building.
 Unsaved project changes prompt you to **Save** or **Cancel** before launch. The
 startup directory (including `cfg/`) is mounted read-only into the container.
 
-The **Simulation — SIMIOC** tab provides IOC shell output and simulation logs.
+The **Simulation — SIMIOC** view has separate **IOC shell**, **Terminal**, and
+**Online tools** tabs. The IOC navigator is embedded by default; select **Open
+online tools in a separate window** when starting the simulation to keep it detached.
+The IOC shell provides startup output and simulation logs. The terminal opens a
+general Bash shell in the same container; connect it after the container has started.
 Type an IOC shell command such as `dbl` in the command field and press **Enter**
 or **Send**. **Stop Simulation** sends `exit` to the IOC and waits for the IOC and
 hardware models to shut down. Clicking **Simulate** while it is running returns
