@@ -518,7 +518,8 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
             return
         try:
             command = simulation_command(self.startup, Path(__file__).resolve().parent,
-                                         options.image.text(), options.hardware_sim.isChecked())
+                                         options.image.text(), options.hardware_sim.isChecked(),
+                                         options.local_sources.isChecked())
         except ValueError as exc:
             self.error(exc)
             return

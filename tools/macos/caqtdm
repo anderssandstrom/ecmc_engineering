@@ -1,0 +1,3 @@
+#!/bin/sh
+# Expose the macOS application under the standard Linux command name.
+exec /Applications/caQtDM.app/Contents/MacOS/caQtDM "$@"

@@ -7,7 +7,7 @@ import shlex
 from qt_compat import QtCore, QtGui, QtWidgets
 
 
-def simulation_command(startup, repository, image="ecmc-dev:portable", hardware_sim=True):
+def simulation_command(startup, repository, image="ecmc-dev:local", hardware_sim=True, local_sources=True):
     startup = Path(startup).resolve()
     launcher = Path(repository).resolve() / "ecmc_podman" / "run-sim.sh"
     if not launcher.is_file():
@@ -17,6 +17,7 @@ def simulation_command(startup, repository, image="ecmc-dev:portable", hardware_
     if not image.strip():
         raise ValueError("Enter a simulation image.")
     return (["bash", str(launcher), "--image", image.strip(), "--ioc-name", "SIMIOC"]
+            + (["--local-sources"] if local_sources else [])
             + (["--hardware-sim"] if hardware_sim else []) + [str(startup)])
 
 
@@ -25,13 +26,16 @@ class SimulationOptionsDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Start simulation")
         layout = QtWidgets.QFormLayout(self)
-        self.image = QtWidgets.QLineEdit("ecmc-dev:portable")
+        self.image = QtWidgets.QLineEdit("ecmc-dev:local")
         layout.addRow("Container image", self.image)
         layout.addRow("IOC name", QtWidgets.QLabel("SIMIOC"))
+        self.local_sources = QtWidgets.QCheckBox("Use local ecmc, ecmccfg and ecmccomp submodules")
+        self.local_sources.setChecked(True)
+        layout.addRow(self.local_sources)
         self.hardware_sim = QtWidgets.QCheckBox("Enable Python hardware simulation")
         self.hardware_sim.setChecked(True)
         layout.addRow(self.hardware_sim)
-        hint = QtWidgets.QLabel("Disable hardware simulation to run the IOC without Python hardware models.")
+        hint = QtWidgets.QLabel("Local sources include edits; unchanged sources reuse the cached image. Disable local sources to use a prebuilt image.")
         hint.setWordWrap(True)
         layout.addRow(hint)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)

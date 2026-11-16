@@ -177,13 +177,18 @@ module versions, and Python hardware models.
 
 In the **Qt engineering tool**, open your project and click **Simulate**. Choose
 the container image and whether to **Enable Python hardware simulation**, then
-click **Start**. With the default options this runs:
+click **Start**. **Use local ecmc, ecmccfg and ecmccomp submodules** is enabled
+by default. With the default options this runs:
 
 ```bash
-./ecmc_podman/run-sim.sh --image ecmc-dev:portable --ioc-name SIMIOC --hardware-sim /path/to/project/IOC_startup.cmd
+./ecmc_podman/run-sim.sh --local-sources --image ecmc-dev:local --ioc-name SIMIOC --hardware-sim /path/to/project/IOC_startup.cmd
 ```
 
-Podman must be running and the `ecmc-dev:portable` image must be available.
+Podman must be running. The first local-source launch builds `ecmc-dev:local`
+from the existing submodules, including local edits. Later launches reuse it
+unless sources or build inputs change; changed inputs use cached build layers.
+The checkouts are left untouched. Uncheck the local-sources option and choose
+an existing image to run without building.
 Unsaved project changes prompt you to **Save** or **Cancel** before launch. The
 startup directory (including `cfg/`) is mounted read-only into the container.
 
@@ -198,6 +203,217 @@ running, it sends `exit` and removes the tab once the process has stopped.
 `ecmc_cfg_tool/start_ioc.sh SIMIOC`, with Channel Access directed to localhost.
 Wait for IOC startup to finish before connecting. The simulation launcher publishes
 the local CA ports; only one simulation can run in this workspace at a time.
+
+## Slit simulation with the current local submodules
+
+The dedicated slit acceptance IOC is in
+`ecmccfg/tests/integration/slit/ioc`. It runs with simulated EtherCAT and uses
+the `SIMSLIT:` PV prefix. Run all commands below from the **ecmc_engineering
+repository root**, with Podman running and the submodules initialized.
+
+### One-command launcher
+
+Use a Python environment with PyEpics installed (`python3 -m pip install pyepics`).
+The convenience wrapper builds or reuses the local-source image, starts the IOC,
+waits for initialization, runs the selected tests, and stops the IOC afterward:
+
+```bash
+# Run the complete suite:
+./run_slit_tests.py
+
+# Run only closed-loop feedback tests:
+./run_slit_tests.py --case feedback --loop closed
+
+# List selected tests without building or starting anything:
+./run_slit_tests.py --list --case feedback
+
+# Start the IOC and coupled plant for manual panel testing:
+./run_slit_tests.py --plant-only
+```
+
+IOC output is saved separately in `test-results/slit/ioc-<timestamp>-<id>.log`,
+so the terminal shows test progress and results without interleaved IOC alarms.
+The launcher prints the log path and a `tail -f` command for following it in
+another terminal. Startup failures and shutdown output are also kept there.
+Use `--ioc-log /path/to/ioc.log` to choose a file (appends when reused), or
+`--show-ioc-log` to also stream IOC output into the test terminal. Test-runner
+errors, including local PyEpics errors, remain visible in the test terminal.
+
+The wrapper sets localhost Channel Access settings for its child processes and
+uses `SIMSLIT:`. It never starts the generic `--hardware-sim` models. Ctrl+C
+stops the test runner/plant and then the IOC. Test failures are returned as a
+nonzero exit status. The default image is `ecmc-dev:local`; use `--image TAG`
+to choose another tag, or `--prebuilt` to skip checking/building local sources.
+`--startup-timeout` controls the IOC initialization wait (default 120 seconds,
+excluding build time). `--case`, `--test`, `--loop`, `--keep-going`, `--report`,
+and `--startat` select test behavior; see `./run_slit_tests.py --help`.
+
+To select a particular Python environment, use
+`/path/to/python run_slit_tests.py` with the same options. The runner uses that
+same interpreter. Stop any other IOC using the published local CA ports before
+launching. For separate IOC and test terminals, follow the manual steps below.
+
+### Open caQtDM axis panels
+
+With the slit IOC running, open all four simulation axes:
+
+```bash
+./start_slit_axes_caqtdm.sh
+```
+
+This opens TR_LO (5), TR_HI (6), CENTERY (12), and GAPY (13) using
+`SIMSLIT:` and localhost Channel Access. For one axis, pass its name and ID:
+
+```bash
+./start_axis_caqtdm.sh TR_LO 5
+./start_axis_caqtdm.sh --ioc MYIOC --dev MYDEVICE --address 192.168.1.10 M1 1
+```
+
+The single-axis launcher defaults to IOC/device prefix `SIMSLIT`; `--dev`
+defaults to the selected IOC. Its address defaults to `EPICS_CA_ADDR_LIST` or
+localhost. Both scripts locate displays relative to the repository and run `caqtdm` from
+PATH. On macOS, install the wrapper described below.
+Use `--dry-run` to inspect commands without opening windows. During automated
+tests, use panels only for observation. For manual motion, run the slit wrapper
+with `--plant-only`.
+
+### Open simulated hardware panels
+
+With the slit IOC running, open caQtDM panels for all seven configured terminals:
+
+```bash
+./start_slit_hardware_caqtdm.sh
+```
+
+This opens EK1100 (0), EL2008 (5), EL5042 (9), EL7031 (12), EL7041-0052 (14),
+EL7062_OPT (20), and EL2252 (21) for `SIMSLIT:`, master 0, on localhost.
+The launcher uses the option-driven two-channel panel for EL7062_OPT.
+It opens status/control displays only; it does not start another plant or
+simulator. Use panels for observation during automated tests. For manual
+interaction, keep `./run_slit_tests.py --plant-only` running.
+`caqtdm` must be on PATH; `--dry-run` prints all launch commands.
+
+### Start the slit IOC
+
+In the first terminal:
+
+```bash
+./ecmc_podman/run-sim.sh \
+  --local-sources \
+  --image ecmc-dev:local \
+  --ioc-name SIMSLIT \
+  ecmccfg/tests/integration/slit/ioc/startup.cmd
+```
+
+This builds from the current local `ecmc`, `ecmccfg`, and `ecmccomp` checkouts,
+including local edits and non-ignored new files. It does not fetch newer
+revisions or change the checkouts. ECMC is built inside the pinned
+`ECMC_makefile` wrapper supplied by the container recipe. The launcher adjusts
+the startup's module versions to those installed in the image.
+
+The first build may take a while. Later launches reuse the image when source
+and build fingerprints match; changed inputs trigger a build using cached
+layers. Restart the IOC with the same command after changing sources.
+
+**Do not add `--hardware-sim` for this fixture.** The slit test runner supplies
+its own coupled drive and encoder models. A second hardware simulator would
+write to the same simulation fields.
+
+Wait for IOC initialization to finish before running tests. Leave this terminal
+open; type `exit` at its IOC prompt after stopping the tests or plant below.
+
+### Run the acceptance tests
+
+In a second terminal, use a Python environment with PyEpics installed and point
+Channel Access at the local container:
+
+```bash
+# Install once in your chosen Python environment, if needed:
+python3 -m pip install pyepics
+
+export EPICS_CA_AUTO_ADDR_LIST=NO
+export EPICS_CA_ADDR_LIST=127.0.0.1
+```
+
+Start with the closed-loop feedback tests:
+
+```bash
+python3 ecmccfg/tests/integration/slit/run.py \
+  --prefix SIMSLIT: --run --case feedback --loop closed
+```
+
+Run the whole suite, which defaults to both open and closed loop:
+
+```bash
+python3 ecmccfg/tests/integration/slit/run.py \
+  --prefix SIMSLIT: --run
+```
+
+Use `--case limits`, `--case brake`, or another case group to select a subset.
+Omit `--run` to list the selected tests without accessing the IOC. The runner
+checks the simulation-mode PV and dedicated fixture schema before issuing
+writes. Reports default to `ecmccfg/test-results/slit/slit-report.json`.
+
+### Run the plant for manual panel testing
+
+Instead of the acceptance suite, start only its coupled hardware model:
+
+```bash
+python3 ecmccfg/tests/integration/slit/run.py \
+  --prefix SIMSLIT: --plant-only
+```
+
+Keep this process running while using panels connected to `SIMSLIT:`. Stop it
+with Ctrl+C before running the acceptance suite; run only one slit plant or
+test runner at a time.
+
+See the [slit fixture documentation](ecmccfg/tests/integration/slit/ioc/README.md)
+and [slit test suite documentation](ecmccfg/tests/integration/slit/README.md)
+for case groups, model behavior, and coverage limits. The local-source launcher
+and GUI have automated checks; a full container build and live slit acceptance
+run with these checkouts have not yet been verified.
+
+## macOS caQtDM command
+
+Linux installations keep using `caqtdm` from PATH. On macOS, install the small
+wrapper once from the engineering repository root:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+cp tools/macos/caqtdm "$HOME/.local/bin/caqtdm"
+chmod +x "$HOME/.local/bin/caqtdm"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` to keep it for new
+terminals. Launch the panels from a terminal with that PATH so their child
+scripts inherit it. The wrapper forwards all arguments to
+`/Applications/caQtDM.app/Contents/MacOS/caQtDM`.
+
+## Open the caQtDM main panel
+
+On non-PSI systems, make the panels and helper files in `ecmccfg/qt`
+accessible at **`/ioc/modules/qt`**, for example through a symlink to that
+directory. Some panel actions use this absolute installation path to launch
+other panels or helper scripts. Opening a panel directly from the checkout
+does not guarantee that all of its launch buttons will work.
+
+The **hardware overview may not work yet** outside the PSI environment:
+its `start_ecmc_overview.py` helper lives in a separate repository and is not
+provided by `ecmccfg/qt`. That helper and its dependencies must also be installed
+and discoverable by the launcher.
+
+Pass the IOC prefix to the generic main-panel launcher:
+
+```bash
+./start_main_caqtdm.sh MYIOC
+# Local simulation:
+./start_main_caqtdm.sh --address 127.0.0.1 SIMSLIT
+```
+
+A trailing colon on the prefix is accepted. The Channel Access address defaults
+to `EPICS_CA_ADDR_LIST` when set, otherwise `127.0.0.1`, matching the axis
+launcher. Broadcast discovery is disabled; use `--address HOST` for a remote IOC. `caqtdm` is launched from PATH. Use `--dry-run` to inspect the command.
 
 ## Online IOC Tools
 
