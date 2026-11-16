@@ -318,3 +318,23 @@ display paths so embedded panels can be found too.
 - The tool reads startup scripts, linked YAML/PLC files, `ecmccfg` hardware data, `ecmccomp` component metadata, and ECMC command information from the submodules.
 - On some Python installations, `tkinter` is missing. In that case the GUI will not start until Tk support is installed.
 - On macOS, some Tk widgets can behave a bit differently than on Linux. The main target environment is Red Hat/Linux, but the tool is also intended to remain usable on macOS.
+
+
+# Test on redhat:
+
+1057  podman build   -t localhost/ecmc-dev:portable   -f ecmc_podman/Containerfile   ecmc_podman/
+ 1058  cd ecmc_podman/
+ 1060  bash build-image.sh 
+ 1063  podman images
+ 1064  ./ecmc_podman/run-sim.sh --image ecmc-dev:portable --ioc-name SIMIOC --hardware-sim myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+ 1065  ./ecmc_podman/run-sim.sh --image ecmc-dev --ioc-name SIMIOC --hardware-sim myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+ 1066  ./ecmc_podman/run-sim.sh --image localhost/ecmc-dev --ioc-name SIMIOC --hardware-sim myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+ 1067  podman images
+ 1068  ./ecmc_podman/run-sim.sh   --image localhost/ecmc-dev:v11.2.0_RC1   --ioc-name SIMIOC   --hardware-sim   myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+
+ ./ecmc_podman/run-sim.sh   --image localhost/ecmc-dev:v11.2.0_RC1   --ioc-name SIMIOC   --hardware-sim   myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+
+needs to use v11.2.0_RC1
+
+This needs some cleanup to make it seemless from ecmc_engineering.. 
+Also teh virtual environment needs to be somehow generated
