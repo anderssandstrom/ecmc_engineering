@@ -37,6 +37,12 @@ class SlitWrapperTests(unittest.TestCase):
         self.assertNotIn('iocRun: All initialization complete', terminal.getvalue())
         self.assertIn(str(logs[0]), terminal.getvalue())
 
+    def test_trace_axis_is_forwarded_to_ioc(self):
+        root = self.fixture('import sys\nassert "ECMC_MOTOR_STATUS_TRACE_AXIS=6" in sys.argv\nprint("iocRun: All initialization complete", flush=True)\nsys.stdin.readline()\n')
+        args = argparse.Namespace(image='test', startup_timeout=2, motor_status_trace_axis=6)
+        with patch.object(wrapper, 'ROOT', root):
+            self.assertEqual(wrapper.run_ioc(args, [sys.executable, '-c', 'pass'], os.environ.copy()), 0)
+
     def test_timeout_does_not_start_tests(self):
         root = self.fixture('import sys\nsys.stdin.readline()\n')
         args = argparse.Namespace(image='test', startup_timeout=.1)
