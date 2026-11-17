@@ -27,6 +27,70 @@ cd ecmc_engineering
 git submodule update --init --recursive
 ```
 
+## Installation and requirements
+
+The supported host platforms are Linux and macOS. Windows is not currently
+supported directly because the simulation launchers use Bash, Unix paths and a
+Linux Podman container. Running the complete application inside WSL2 may work,
+but is not currently a tested or supported configuration.
+
+Install these base tools:
+
+- Python 3
+- Git and Bash
+- all Git submodules (`git submodule update --init --recursive`)
+- one Qt Python binding: `PyQt5` or `PySide6`
+
+For live IOC access and the embedded online navigator, also install one EPICS
+client backend:
+
+- `pyepics` (preferred), or
+- the EPICS `caget` and `caput` command-line tools on `PATH`
+
+The launcher does not create or modify a host Python environment. It uses
+`ECMC_PYTHON` when set, otherwise the first `python` or `python3` with a supported
+Qt binding. An optional isolated environment can be prepared with:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install PyQt5 pyepics
+export ECMC_PYTHON="$PWD/.venv/bin/python"
+```
+
+Use `PySide6` instead of `PyQt5` if preferred. The `.venv` directory is a local
+host environment and should not be committed.
+
+Simulation additionally requires:
+
+- Podman, installed and running
+- enough disk space for container images and build layers
+- approximately 8 GB of Podman VM memory when compiling on macOS
+
+On macOS, initialise and start the Podman Linux VM once:
+
+```bash
+podman machine init
+podman machine start
+```
+
+The simulation image creates its own `/opt/ecmc-python` virtual environment and
+installs the pinned packages from `ecmc_podman/container/requirements.txt` while
+the image is built. This is separate from the optional host environment above.
+
+Optional features require additional software:
+
+- caQtDM for graphical control panels
+- SSH for remote SDO access; the remote IOC host must provide its EtherCAT tools
+- Tkinter only for the legacy Tk workspace
+
+Start the Qt Studio after installing the applicable dependencies:
+
+```bash
+bash start_engineering_qt.sh
+```
+
 ## Repository Layout
 
 - `ecmc_engineering_studio.py`: main GUI application
@@ -185,14 +249,19 @@ by default. With the default options this runs:
 ```
 
 Podman must be running. The first local-source launch builds `ecmc-dev:local`
-from the existing submodules, including local edits. Later launches reuse it
+from the existing submodules, including local edits, and may take several minutes
+while the modules compile. Later launches reuse it
 unless sources or build inputs change; changed inputs use cached build layers.
 The checkouts are left untouched. Uncheck the local-sources option and choose
 an existing image to run without building.
 Unsaved project changes prompt you to **Save** or **Cancel** before launch. The
 startup directory (including `cfg/`) is mounted read-only into the container.
 
-The **Simulation — SIMIOC** tab provides IOC shell output and simulation logs.
+The **Simulation — SIMIOC** view has separate **IOC shell**, **Terminal**, and
+**Online tools** tabs. The IOC navigator is embedded by default; select **Open
+online tools in a separate window** when starting the simulation to keep it detached.
+The IOC shell provides startup output and simulation logs. The terminal opens a
+general Bash shell in the same container; connect it after the container has started.
 Type an IOC shell command such as `dbl` in the command field and press **Enter**
 or **Send**. **Stop Simulation** sends `exit` to the IOC and waits for the IOC and
 hardware models to shut down. Clicking **Simulate** while it is running returns
@@ -534,3 +603,23 @@ display paths so embedded panels can be found too.
 - The tool reads startup scripts, linked YAML/PLC files, `ecmccfg` hardware data, `ecmccomp` component metadata, and ECMC command information from the submodules.
 - On some Python installations, `tkinter` is missing. In that case the GUI will not start until Tk support is installed.
 - On macOS, some Tk widgets can behave a bit differently than on Linux. The main target environment is Red Hat/Linux, but the tool is also intended to remain usable on macOS.
+
+
+# Test on redhat:
+
+1057  podman build   -t localhost/ecmc-dev:portable   -f ecmc_podman/Containerfile   ecmc_podman/
+ 1058  cd ecmc_podman/
+ 1060  bash build-image.sh 
+ 1063  podman images
+ 1064  ./ecmc_podman/run-sim.sh --image ecmc-dev:portable --ioc-name SIMIOC --hardware-sim myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+ 1065  ./ecmc_podman/run-sim.sh --image ecmc-dev --ioc-name SIMIOC --hardware-sim myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+ 1066  ./ecmc_podman/run-sim.sh --image localhost/ecmc-dev --ioc-name SIMIOC --hardware-sim myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+ 1067  podman images
+ 1068  ./ecmc_podman/run-sim.sh   --image localhost/ecmc-dev:v11.2.0_RC1   --ioc-name SIMIOC   --hardware-sim   myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+
+ ./ecmc_podman/run-sim.sh   --image localhost/ecmc-dev:v11.2.0_RC1   --ioc-name SIMIOC   --hardware-sim   myProjects/MY_TEST_PROJECT/MY_TEST_PROJECT_startup.cmd
+
+needs to use v11.2.0_RC1
+
+This needs some cleanup to make it seemless from ecmc_engineering.. 
+Also teh virtual environment needs to be somehow generated

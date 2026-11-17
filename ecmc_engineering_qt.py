@@ -523,7 +523,8 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
         except ValueError as exc:
             self.error(exc)
             return
-        console = SimulationConsole(command, self.startup.parent, self)
+        console = SimulationConsole(command, self.startup.parent, self,
+                                    options.detached_online_tools.isChecked())
         if self.simulation_console is not None:
             old = self.simulation_console
             self.tabs.removeTab(self.tabs.indexOf(old))

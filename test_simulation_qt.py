@@ -36,11 +36,14 @@ class SimulationTests(unittest.TestCase):
 
     def test_launcher_arguments_and_real_script_dry_run(self):
         command = simulation_command(self.startup, Path(__file__).resolve().parent)
-        self.assertEqual(command[2:], ['--image', 'ecmc-dev:local', '--ioc-name', 'SIMIOC', '--local-sources', '--hardware-sim', str(self.startup)])
+        self.assertEqual(command[2:], ['--image', 'ecmc-dev:local', '--container-name',
+                                      'ecmc-engineering-simulation', '--ioc-name', 'SIMIOC',
+                                      '--local-sources', '--hardware-sim', str(self.startup)])
         result = subprocess.run(command[:2] + ['--dry-run'] + command[2:], text=True, capture_output=True, check=True)
         self.assertIn('ecmc-dev:local', result.stdout)
         self.assertIn('RUN_SIM_IOC_NAME=SIMIOC', result.stdout)
         self.assertIn('RUN_SIM_HARDWARE=1', result.stdout)
+        self.assertIn('--name ecmc-engineering-simulation', result.stdout)
         self.assertIn(':/config:ro', result.stdout)
         self.assertIn('./test_startup.cmd', result.stdout)
 
@@ -49,6 +52,20 @@ class SimulationTests(unittest.TestCase):
                                      image='ecmc-dev:portable', local_sources=False)
         self.assertNotIn('--local-sources', command)
         self.assertIn('ecmc-dev:portable', command)
+
+    def test_first_build_notice_and_two_console_tabs(self):
+        dialog = SimulationOptionsDialog()
+        self.assertIn('may take several minutes', dialog.findChildren(QtWidgets.QLabel)[-1].text())
+        console = SimulationConsole(['bash', 'unused'], self.root)
+        self.assertEqual(console.console_tabs.count(), 3)
+        self.assertEqual(console.console_tabs.tabText(0), 'IOC shell')
+        self.assertEqual(console.console_tabs.tabText(1), 'Terminal')
+        self.assertEqual(console.console_tabs.tabText(2), 'Online tools')
+
+    def test_detached_online_tools_option_avoids_embedded_navigator(self):
+        console = SimulationConsole(['bash', 'unused'], self.root, detached_online_tools=True)
+        self.assertIsNone(console.online_navigator)
+        self.assertEqual(console.console_tabs.tabText(2), 'Online tools')
 
     def test_missing_runtime_is_reported(self):
         with self.assertRaisesRegex(ValueError, 'runtime is missing'):
@@ -160,7 +177,7 @@ class SimulationTests(unittest.TestCase):
             self.assertEqual(environment.value('EPICS_CA_SERVER_PORT'), '5064')
             self.assertFalse(environment.contains('ETHERCAT_HOST'))
             self.assertEqual(os.environ['EPICS_CA_ADDR_LIST'], 'physical-controller')
-            console = SimulationConsole(['bash', 'unused'], self.root)
+            console = SimulationConsole(['bash', 'unused'], self.root, detached_online_tools=True)
             launched = []
             def detach(process):
                 launched.append((process.program(), process.arguments(), process.processEnvironment()))
