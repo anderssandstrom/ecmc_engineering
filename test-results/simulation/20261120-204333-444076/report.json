@@ -1,0 +1,164 @@
+{
+  "status": "failed",
+  "selected": [
+    "offline",
+    "inventory",
+    "motion",
+    "slit"
+  ],
+  "stages": [
+    {
+      "name": "dependencies",
+      "status": "passed",
+      "seconds": 0.001
+    },
+    {
+      "name": "offline/test_ds402_model",
+      "status": "passed",
+      "seconds": 0.106
+    },
+    {
+      "name": "offline/test_el7041_model",
+      "status": "passed",
+      "seconds": 0.209
+    },
+    {
+      "name": "offline/test_simulation_gui",
+      "status": "passed",
+      "seconds": 4.29
+    },
+    {
+      "name": "offline/test_simulation_ioc",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_simulation_terminals",
+      "status": "passed",
+      "seconds": 0.314
+    },
+    {
+      "name": "offline/test_slit_acceptance",
+      "status": "passed",
+      "seconds": 0.839
+    },
+    {
+      "name": "offline/test_slit_backlash",
+      "status": "passed",
+      "seconds": 1.349
+    },
+    {
+      "name": "offline/test_slit_boundaries",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_disturbance",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_enable_timeout",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_encoder_power",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_homing",
+      "status": "passed",
+      "seconds": 0.212
+    },
+    {
+      "name": "offline/test_slit_index_encoders",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_interfaces",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_isolation",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_limit_modes",
+      "status": "passed",
+      "seconds": 0.212
+    },
+    {
+      "name": "offline/test_slit_limit_sync",
+      "status": "passed",
+      "seconds": 0.104
+    },
+    {
+      "name": "offline/test_slit_motion_requests",
+      "status": "passed",
+      "seconds": 0.519
+    },
+    {
+      "name": "offline/test_slit_native",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_noise",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_plant_timing",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_preparation",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_recovery",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_settings",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_soft_limits",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_touch_probe_model",
+      "status": "passed",
+      "seconds": 0.52
+    },
+    {
+      "name": "build",
+      "status": "passed",
+      "seconds": 2.601
+    },
+    {
+      "name": "inventory",
+      "status": "failed",
+      "error": "IOC did not publish readiness markers: All initialization complete",
+      "seconds": 135.442
+    }
+  ],
+  "filters": {
+    "motion_case": [],
+    "slit_loop": "both",
+    "slit_case": [],
+    "slit_test": [],
+    "startat": null
+  }
+}

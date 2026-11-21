@@ -117,6 +117,12 @@ def run_ioc(args, test_command, environment):
                     tests.kill()
                     tests.wait()
     finally:
+        if trace_axis is not None and ready.is_set() and process.poll() is None:
+            try:
+                process.stdin.write('asynReport 2, "${ECMC_MOTOR_PORT}"\n')
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
         print(f'Stopping slit IOC… (log: {log_path})', flush=True)
         stop_ioc(process, name)
         if not process.stdin.closed:
@@ -129,7 +135,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ioc-log', help='IOC log file (appends; default: timestamped file in test-results/slit/)')
     parser.add_argument('--show-ioc-log', action='store_true', help='also print IOC output in the test terminal')
-    parser.add_argument('--motor-status-trace-axis', type=int, help='buffer motor status diagnostics for this ECMC axis; dump on fault reset into IOC log')
+    parser.add_argument('--motor-status-trace-axis', type=int, help='buffer motor status diagnostics for this ECMC axis; dump into the IOC log')
     parser.add_argument('--image', default='ecmc-dev:local')
     parser.add_argument('--prebuilt', action='store_true', help='use the image as-is instead of checking/building local sources')
     parser.add_argument('--startup-timeout', type=float, default=120, help='IOC initialization timeout in seconds, excluding build time')

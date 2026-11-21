@@ -9,8 +9,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from ecmc_engineering_qt import EngineeringWindow, QtWidgets, QtCore
-from ecmc_simulation_qt import SimulationConsole, SimulationOptionsDialog, simulation_command, simulation_online_environment
+from engineering.ecmc_engineering_qt import EngineeringWindow, QtWidgets, QtCore
+from engineering.ecmc_simulation_qt import SimulationConsole, SimulationOptionsDialog, simulation_command, simulation_online_environment
 
 
 class SimulationTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class SimulationTests(unittest.TestCase):
         self.assertTrue(predicate())
 
     def test_launcher_arguments_and_real_script_dry_run(self):
-        command = simulation_command(self.startup, Path(__file__).resolve().parent)
+        command = simulation_command(self.startup, Path(__file__).resolve().parents[1])
         self.assertEqual(command[2:], ['--image', 'ecmc-dev:local', '--container-name',
                                       'ecmc-engineering-simulation', '--ioc-name', 'SIMIOC',
                                       '--local-sources', '--hardware-sim', str(self.startup)])
@@ -48,7 +48,7 @@ class SimulationTests(unittest.TestCase):
         self.assertIn('./test_startup.cmd', result.stdout)
 
     def test_prebuilt_image_can_be_selected(self):
-        command = simulation_command(self.startup, Path(__file__).resolve().parent,
+        command = simulation_command(self.startup, Path(__file__).resolve().parents[1],
                                      image='ecmc-dev:portable', local_sources=False)
         self.assertNotIn('--local-sources', command)
         self.assertIn('ecmc-dev:portable', command)

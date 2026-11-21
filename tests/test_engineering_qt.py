@@ -1,6 +1,6 @@
 """Dialog regression checks using real Qt widgets and modal event loops.
 
-Run with the Qt Python environment: python -m unittest test_engineering_qt
+Run with the Qt Python environment: python -m unittest discover -s tests -p test_engineering_qt.py
 """
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,11 +12,11 @@ import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from ecmc_engineering_qt import EngineeringWindow, QtCore, QtWidgets
-from ecmc_object_editor_qt import ObjectDialog, OBJECT_ROLE
-from ecmc_project_commands import read_values, render_command, replace_line, OBJECT_TYPES
-from ecmc_ioc_project import create_ioc_project
-import ecmc_engineering_studio as core
+from engineering.ecmc_engineering_qt import EngineeringWindow, QtCore, QtWidgets
+from engineering.ecmc_object_editor_qt import ObjectDialog, OBJECT_ROLE
+from engineering.ecmc_project_commands import read_values, render_command, replace_line, OBJECT_TYPES
+from engineering.ecmc_ioc_project import create_ioc_project
+from engineering import ecmc_engineering_studio as core
 
 
 class DialogTests(unittest.TestCase):

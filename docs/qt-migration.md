@@ -1,8 +1,8 @@
 # Qt engineering migration
 
 The Qt workspace uses the existing startup parser, repository inventory and
-validator. `ecmc_project_commands.py` handles source command values and rendering;
-`ecmc_object_editor_qt.py` supplies field dialogs and tree actions. The Tk editor
+validator. `engineering/ecmc_project_commands.py` handles source command values and rendering;
+`engineering/ecmc_object_editor_qt.py` supplies field dialogs and tree actions. The Tk editor
 remains available throughout migration.
 
 ## Available

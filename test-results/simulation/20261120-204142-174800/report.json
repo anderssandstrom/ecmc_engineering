@@ -1,0 +1,34 @@
+{
+  "status": "failed",
+  "selected": [
+    "offline",
+    "inventory",
+    "motion",
+    "slit"
+  ],
+  "stages": [
+    {
+      "name": "offline/test_ds402_model",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_el7041_model",
+      "status": "passed",
+      "seconds": 0.208
+    },
+    {
+      "name": "offline/test_simulation_gui",
+      "status": "failed",
+      "error": "Command exited with status 1",
+      "seconds": 5.618
+    }
+  ],
+  "filters": {
+    "motion_case": [],
+    "slit_loop": "both",
+    "slit_case": [],
+    "slit_test": [],
+    "startat": null
+  }
+}

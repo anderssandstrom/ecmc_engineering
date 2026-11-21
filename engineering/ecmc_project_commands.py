@@ -4,7 +4,7 @@ Read values from source rather than the resolved object model: editing one field
 must not freeze macro references in the rest of the command.
 """
 import re
-import ecmc_engineering_studio as core
+from . import ecmc_engineering_studio as core
 
 # Label, startup script, commonly edited fields. Additional macros are retained
 # and can be added through the editor even when not listed here.

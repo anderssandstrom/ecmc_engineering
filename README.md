@@ -91,10 +91,72 @@ Start the Qt Studio after installing the applicable dependencies:
 bash start_engineering_qt.sh
 ```
 
+## Run the simulation checks
+
+From the engineering checkout:
+
+```sh
+./run_simulation_tests.py
+```
+
+The runner checks the offline simulator suite first, builds or reuses
+the local image once, then runs the slave inventory, motion/PLC IOC,
+and open- and closed-loop slit suites in separate containers. It stops
+on the first failure, shuts down the active IOC, and saves a JSON
+summary and logs under `test-results/simulation/<run>/`. The slit stage
+also writes its detailed JSON and JUnit reports.
+
+Use repeatable `--suite offline|inventory|motion|slit` options to select
+stages. For example, `./run_simulation_tests.py --suite motion` starts the
+motion IOC and runs its Python checker. Use `--prebuilt` to reuse a
+prepared image and `--slit-loop open` to run only the open-loop slit cases.
+For a focused run with the same startup and reporting:
+
+```sh
+./run_simulation_tests.py --suite motion --motion-case variables --motion-case m2m
+./run_simulation_tests.py --suite slit --slit-loop closed --slit-case noise
+```
+
+Use `--slit-test` for a test name substring and `--startat N` to resume
+the numbered slit run with the same loop and filters. The JSON summary records
+the selected suites and filters.
+
+Install the runner dependencies into the same Python environment you use
+to run the script:
+
+```sh
+python3 -m pip install jinja2 pyyaml pyepics
+```
+
+The offline checks use Jinja2 and PyYAML. The live stages need Podman,
+and the motion/slit checkers need host PyEpics.
+The live stages use localhost CA port 5064, so stop any existing container
+using that port first. The inventory IOC can take several minutes to load.
+Its startup timeout defaults to 15 minutes. Override it with
+`--inventory-startup-timeout SECONDS`. Motion and slit keep their separate
+`--startup-timeout` setting.
+
+The runner's failure and shutdown paths can be checked without Podman or
+an IOC:
+
+```sh
+python3 -m unittest discover -s tests -p test_run_simulation_tests.py
+```
+
+ECMC's `tests/test_homing_sequences.py` also checks successful position
+compare using a deterministic simulated clock and output terminal. The
+live slit fixture checks the missing-clock and cancellation path.
+
+Keep the engineering root as the launcher and workspace entry point.
+Put simulation fixtures and acceptance checks together under
+`ecmccfg/tests/integration/<suite>/`, offline model checks under
+`ecmccfg/tests/simulation/`, and generated reports under `test-results/`.
+The existing manual launchers remain available for interactive debugging.
+
 ## Repository Layout
 
-- `ecmc_engineering_studio.py`: main GUI application
-- `compat_dataclasses.py`: compatibility helper
+- `engineering/`: Qt and Tk workspace application and its Python modules
+- `tests/`: engineering workspace and launcher regression checks
 - `ecmccfg/`: submodule with startup scripts, hardware descriptions, examples, and framework files
 - `ecmccomp/`: submodule with supported component definitions
 - `ecmc/`: submodule used for ECMC command parsing and command help
@@ -196,7 +258,7 @@ the `ECMC_PYTHON` override.
 Run the Qt regression checks using a Python environment with Qt installed:
 
 ```bash
-python -m unittest -v test_engineering_qt test_simulation_qt
+python -m unittest discover -s tests -p "test_*qt.py" -v
 ```
 
 ### Existing Tk workspace
@@ -204,19 +266,19 @@ python -m unittest -v test_engineering_qt test_simulation_qt
 Run from the repository root:
 
 ```bash
-python ecmc_engineering_studio.py --startup examples/startup_local_hw.cmd
+python -m engineering.ecmc_engineering_studio --startup examples/startup_local_hw.cmd
 ```
 
 Example using a startup file from the `ecmccfg` submodule:
 
 ```bash
-python ecmc_engineering_studio.py --startup ecmccfg/examples/PSI/lab_setup/stepper_bissc/startup_local_hw.cmd
+python -m engineering.ecmc_engineering_studio --startup ecmccfg/examples/PSI/lab_setup/stepper_bissc/startup_local_hw.cmd
 ```
 
 You can also start without `--startup` and open a file from the GUI afterwards:
 
 ```bash
-python ecmc_engineering_studio.py
+python -m engineering.ecmc_engineering_studio
 ```
 
 ## Simulation Runtime

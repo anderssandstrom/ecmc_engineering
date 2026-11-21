@@ -19,7 +19,7 @@ import tempfile
 import time
 from functools import lru_cache
 from datetime import datetime
-from compat_dataclasses import dataclass, field
+from .compat_dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -201,7 +201,7 @@ class ExpandedTextLine:
 
 
 def _repository_root() -> Path:
-    return Path(__file__).resolve().parent
+    return Path(__file__).resolve().parents[1]
 
 
 def _find_ecmccfg_root(anchor: Optional[Path] = None) -> Optional[Path]:

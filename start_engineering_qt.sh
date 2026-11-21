@@ -7,4 +7,4 @@ if [ ! -f "${SCRIPT_DIR}/ecmc_cfg_tool/qt_runtime.sh" ]; then
 fi
 source "${SCRIPT_DIR}/ecmc_cfg_tool/qt_runtime.sh"
 PYTHON_BIN="$(find_qt_python)" || { print_qt_python_error; exit 1; }
-exec "${PYTHON_BIN}" "${SCRIPT_DIR}/ecmc_engineering_qt.py" "$@"
+PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" exec "${PYTHON_BIN}" -m engineering.ecmc_engineering_qt "$@"

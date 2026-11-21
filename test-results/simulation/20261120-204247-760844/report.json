@@ -1,0 +1,79 @@
+{
+  "status": "failed",
+  "selected": [
+    "offline",
+    "inventory",
+    "motion",
+    "slit"
+  ],
+  "stages": [
+    {
+      "name": "offline/test_ds402_model",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_el7041_model",
+      "status": "passed",
+      "seconds": 0.211
+    },
+    {
+      "name": "offline/test_simulation_gui",
+      "status": "passed",
+      "seconds": 4.473
+    },
+    {
+      "name": "offline/test_simulation_ioc",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_simulation_terminals",
+      "status": "passed",
+      "seconds": 0.316
+    },
+    {
+      "name": "offline/test_slit_acceptance",
+      "status": "passed",
+      "seconds": 0.529
+    },
+    {
+      "name": "offline/test_slit_backlash",
+      "status": "passed",
+      "seconds": 1.354
+    },
+    {
+      "name": "offline/test_slit_boundaries",
+      "status": "passed",
+      "seconds": 0.103
+    },
+    {
+      "name": "offline/test_slit_disturbance",
+      "status": "passed",
+      "seconds": 0.103
+    },
+    {
+      "name": "offline/test_slit_enable_timeout",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_encoder_power",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_homing",
+      "status": "failed",
+      "error": "Command exited with status 1",
+      "seconds": 0.107
+    }
+  ],
+  "filters": {
+    "motion_case": [],
+    "slit_loop": "both",
+    "slit_case": [],
+    "slit_test": [],
+    "startat": null
+  }
+}

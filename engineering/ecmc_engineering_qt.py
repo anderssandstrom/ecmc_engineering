@@ -4,13 +4,13 @@ import argparse
 from pathlib import Path
 import sys
 
-TOOLS = Path(__file__).resolve().parent / "ecmc_cfg_tool"
+TOOLS = Path(__file__).resolve().parents[1] / "ecmc_cfg_tool"
 sys.path.insert(0, str(TOOLS))
 from qt_compat import QtCore, QtGui, QtWidgets
-import ecmc_engineering_studio as core
-from ecmc_object_editor_qt import ObjectEditingMixin, OBJECT_ROLE, ROW_ROLE
-from ecmc_ioc_project import create_ioc_project, parameters_path
-from ecmc_simulation_qt import SimulationConsole, SimulationOptionsDialog, simulation_command
+from . import ecmc_engineering_studio as core
+from .ecmc_object_editor_qt import ObjectEditingMixin, OBJECT_ROLE, ROW_ROLE
+from .ecmc_ioc_project import create_ioc_project, parameters_path
+from .ecmc_simulation_qt import SimulationConsole, SimulationOptionsDialog, simulation_command
 
 
 class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
@@ -193,7 +193,7 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
                 row = QtWidgets.QTreeWidgetItem(group, [str(key), str(value)])
                 row.setToolTip(1, str(value))
             group.setExpanded(True)
-        from ecmc_project_commands import OBJECT_TYPES
+        from .ecmc_project_commands import OBJECT_TYPES
         script = OBJECT_TYPES.get(obj.kind, ("", "", ""))[1]
         if obj.kind == "require" and values.get("MODULE") == "ecmccfg":
             script = "startup.cmd"
@@ -502,7 +502,7 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
             self.error("Open or create an IOC project before starting a simulation.")
             return
         try:
-            command = simulation_command(self.startup, Path(__file__).resolve().parent)
+            command = simulation_command(self.startup, Path(__file__).resolve().parents[1])
         except ValueError as exc:
             self.error(exc)
             return
@@ -517,7 +517,7 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
         if options.exec_() != QtWidgets.QDialog.Accepted:
             return
         try:
-            command = simulation_command(self.startup, Path(__file__).resolve().parent,
+            command = simulation_command(self.startup, Path(__file__).resolve().parents[1],
                                          options.image.text(), options.hardware_sim.isChecked(),
                                          options.local_sources.isChecked())
         except ValueError as exc:

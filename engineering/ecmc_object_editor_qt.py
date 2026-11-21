@@ -4,8 +4,8 @@ import re
 from functools import wraps
 
 from qt_compat import QtCore, QtGui, QtWidgets
-import ecmc_engineering_studio as core
-from ecmc_project_commands import OBJECT_TYPES, CHILD_TYPES, read_values, render_command, replace_line
+from . import ecmc_engineering_studio as core
+from .ecmc_project_commands import OBJECT_TYPES, CHILD_TYPES, read_values, render_command, replace_line
 
 OBJECT_ROLE = int(QtCore.Qt.UserRole) + 1
 ROW_ROLE = int(QtCore.Qt.UserRole) + 2

@@ -156,7 +156,7 @@ class SimulationConsole(QtWidgets.QWidget):
             if self.online_navigator is not None:
                 self.online_navigator.refresh()
             return
-        launcher = Path(__file__).resolve().parent / "ecmc_cfg_tool" / "start_ioc.sh"
+        launcher = Path(__file__).resolve().parents[1] / "ecmc_cfg_tool" / "start_ioc.sh"
         if not launcher.is_file():
             self.append_output("\nOnline tools are missing. Run git submodule update --init --recursive.\n")
             return

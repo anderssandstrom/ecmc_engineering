@@ -1,0 +1,173 @@
+{
+  "status": "interrupted",
+  "selected": [
+    "offline",
+    "inventory",
+    "motion",
+    "slit"
+  ],
+  "stages": [
+    {
+      "name": "dependencies",
+      "status": "passed",
+      "seconds": 0.0
+    },
+    {
+      "name": "offline/test_ds402_model",
+      "status": "passed",
+      "seconds": 0.102
+    },
+    {
+      "name": "offline/test_el7041_model",
+      "status": "passed",
+      "seconds": 0.212
+    },
+    {
+      "name": "offline/test_simulation_gui",
+      "status": "passed",
+      "seconds": 4.378
+    },
+    {
+      "name": "offline/test_simulation_ioc",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_simulation_terminals",
+      "status": "passed",
+      "seconds": 0.312
+    },
+    {
+      "name": "offline/test_slit_acceptance",
+      "status": "passed",
+      "seconds": 0.519
+    },
+    {
+      "name": "offline/test_slit_backlash",
+      "status": "passed",
+      "seconds": 1.349
+    },
+    {
+      "name": "offline/test_slit_boundaries",
+      "status": "passed",
+      "seconds": 0.106
+    },
+    {
+      "name": "offline/test_slit_disturbance",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_enable_timeout",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_encoder_power",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_homing",
+      "status": "passed",
+      "seconds": 0.212
+    },
+    {
+      "name": "offline/test_slit_index_encoders",
+      "status": "passed",
+      "seconds": 0.106
+    },
+    {
+      "name": "offline/test_slit_interfaces",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_isolation",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_limit_modes",
+      "status": "passed",
+      "seconds": 0.209
+    },
+    {
+      "name": "offline/test_slit_limit_sync",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_motion_requests",
+      "status": "passed",
+      "seconds": 0.526
+    },
+    {
+      "name": "offline/test_slit_native",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_noise",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_plant_timing",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_preparation",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_recovery",
+      "status": "passed",
+      "seconds": 0.102
+    },
+    {
+      "name": "offline/test_slit_settings",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_soft_limits",
+      "status": "passed",
+      "seconds": 0.105
+    },
+    {
+      "name": "offline/test_touch_probe_model",
+      "status": "passed",
+      "seconds": 0.528
+    },
+    {
+      "name": "build",
+      "status": "passed",
+      "seconds": 2.628
+    },
+    {
+      "name": "inventory",
+      "status": "passed",
+      "seconds": 280.261
+    },
+    {
+      "name": "motion",
+      "status": "passed",
+      "seconds": 34.19
+    },
+    {
+      "name": "slit",
+      "status": "interrupted",
+      "seconds": 158.616
+    }
+  ],
+  "filters": {
+    "motion_case": [],
+    "slit_loop": "both",
+    "slit_case": [],
+    "slit_test": [],
+    "startat": null
+  }
+}
