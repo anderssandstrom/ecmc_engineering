@@ -288,13 +288,13 @@ The launcher uses `ecmc_podman/run-sim.sh --local-sources` and
 `ecmc-dev:local` by default, building against the **currently checked-out**
 `ecmc`, `ecmccfg` and `ecmccomp` submodules without updating them.
 The IOC uses `SIM=1` and `SIMPROFILES:`, with no physical EtherCAT access.
-The optional Python `--hardware-sim` model is intentionally **not enabled**.
-This is a configuration/startup smoke test; it does not enable axes or move motors.
+The Python `--hardware-sim` model is **off by default**. Use\n`./start_hardware_profiles_sim.sh --hardware-sim` to start the supported\nmotor models for manual open-loop motion tests. The hardware-model subprocess\ndiscovers simulated slave PDOs under `SIMPROFILES:SIM:` and is supervised\nalongside the IOC. No automatic moves are issued.\n\nCurrent model coverage includes EL7031, EL7041, EL7047, EL7062 and standard\nEL72xx drives. EL7037 is not in the runner's stepper model list, and external\nencoder-terminal models do not automatically follow motor motion. Start with a\nself-contained open-loop stepper axis (for example S7031, axis 1), and leave\nother axes disabled until their feedback/limit behavior is understood. EL7062\nlimit input bits may need manual simulation initialization. This is not a full\nacceptance test for all ten axes.
 
 ```bash
 bash start_hardware_profiles_sim.sh --dry-run
 bash start_hardware_profiles_sim.sh --prebuilt --image ecmc-dev:local
 bash start_hardware_profiles_sim.sh --no-ports
+bash start_hardware_profiles_sim.sh --hardware-sim  # opt-in motor/encoder plant models
 ```
 
 Stop the IOC by typing `exit` in its shell. Ensure no other simulator has
