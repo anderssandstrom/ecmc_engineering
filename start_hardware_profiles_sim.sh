@@ -60,7 +60,7 @@ done
     fail "ecmc_podman submodule missing; run: git submodule update --init --recursive"
 [[ -f "$startup" ]] ||
     fail "hardware-profile IOC missing in ecmccfg submodule; check out feature/hardware-abstraction in ecmccfg"
-for file in axis_csv.yaml axis_csp.yaml axis_el7062.yaml; do
+for file in axis_csv.yaml axis_csp.yaml axis_el7062.yaml axis_el70xx_openloop.yaml; do
     [[ -f "${startup%/*}/$file" ]] || fail "missing simulation config: $file"
 done
 
