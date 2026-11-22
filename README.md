@@ -335,6 +335,42 @@ running, it sends `exit` and removes the tab once the process has stopped.
 Wait for IOC startup to finish before connecting. The simulation launcher publishes
 the local CA ports; only one simulation can run in this workspace at a time.
 
+## Hardware-profile SIM IOC with Podman
+
+The dedicated hardware-profile matrix in
+`ecmccfg/tests/integration/hardware_profiles/ioc` covers CSV/CSP and
+multiple encoder/stepper/servo terminal combinations. Run from this repository
+after checking out `feature/hardware-abstraction` in the `ecmccfg` submodule:
+
+```bash
+bash start_hardware_profiles_sim.sh
+```
+
+The launcher uses `ecmc_podman/run-sim.sh --local-sources` and
+`ecmc-dev:local` by default, building against the **currently checked-out**
+`ecmc`, `ecmccfg` and `ecmccomp` submodules without updating them.
+The IOC uses `SIM=1` and `SIMPROFILES:`, with no physical EtherCAT access.
+The optional Python `--hardware-sim` model is intentionally **not enabled**.
+This is a configuration/startup smoke test; it does not enable axes or move motors.
+
+```bash
+bash start_hardware_profiles_sim.sh --dry-run
+bash start_hardware_profiles_sim.sh --prebuilt --image ecmc-dev:local
+bash start_hardware_profiles_sim.sh --no-ports
+```
+
+Stop the IOC by typing `exit` in its shell. Ensure no other simulator has
+the localhost Channel Access ports 5064 TCP/UDP open. For offline profile
+rendering tests (no IOC or Podman), run
+`python3 ecmccfg/tests/test_hardware_profile_sim.py -v`.
+The simulator config and test coverage are documented in
+[`ecmccfg/tests/integration/hardware_profiles/README.md`](ecmccfg/tests/integration/hardware_profiles/README.md).
+
+**Important:** The pinned `ecmccfg` submodule revision may not yet contain
+the hardware-profile fixture. Switch that submodule to the feature branch,
+then use `--local-sources` (default) so the newly selected code is built.
+The branch's full startup test against ECMC RC1 still requires validation.
+
 ## Slit simulation with the current local submodules
 
 The dedicated slit acceptance IOC is in
