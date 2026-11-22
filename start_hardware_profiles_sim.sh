@@ -10,6 +10,7 @@ image="ecmc-dev:local"
 prebuilt=0
 dry_run=0
 no_ports=0
+hardware_sim=0
 container_name=""
 ioc_name="SIMPROFILES"
 
@@ -25,11 +26,12 @@ Options:
   --prebuilt             Use an existing image; skip local-source build
   --container-name NAME  Optional Podman container name
   --no-ports             Do not publish local EPICS Channel Access ports
+  --hardware-sim         Run supported Python motor/feedback models (opt-in)
   --dry-run              Print the build/container commands without running
   -h, --help             Show this help
 
 The IOC is configured with SIM=1 and has PV prefix SIMPROFILES:.
-It does not start the external --hardware-sim model or issue move commands.
+By default, no external hardware model runs. --hardware-sim starts the supported\nmodels (not all terminals are modeled). No moves are issued automatically.
 Type 'exit' in the IOC shell to stop it.
 EOF
 }
@@ -49,6 +51,7 @@ while (($#)); do
         --prebuilt) prebuilt=1; shift ;;
         --dry-run) dry_run=1; shift ;;
         --no-ports) no_ports=1; shift ;;
+        --hardware-sim) hardware_sim=1; shift ;;
         *) fail "unknown argument: $1 (try --help)" ;;
     esac
 done
@@ -67,6 +70,10 @@ if (( !prebuilt )); then
     cmd+=(--local-sources)
 fi
 cmd+=(--image "$image" --ioc-name "$ioc_name")
+if ((hardware_sim)); then
+    # The hardware model discovers SIM PDO records under this prefix.
+    cmd+=(--hardware-sim --sim-prefix "$ioc_name:SIM:")
+fi
 if [[ -n "$container_name" ]]; then
     cmd+=(--container-name "$container_name")
 fi
@@ -81,6 +88,7 @@ cmd+=("$startup")
 echo "Hardware-profile SIM IOC: $startup"
 echo "Image: $image ($([[ $prebuilt == 1 ]] && echo prebuilt || echo local sources))"
 echo "Prefix: $ioc_name:"
+echo "Hardware models: $([[ $hardware_sim == 1 ]] && echo enabled || echo disabled)"
 printf 'Command: '
 printf '%q ' "${cmd[@]}"
 printf '\n'
