@@ -10,7 +10,10 @@ from qt_compat import QtCore, QtGui, QtWidgets
 from . import ecmc_engineering_studio as core
 from .ecmc_object_editor_qt import ObjectEditingMixin, OBJECT_ROLE, ROW_ROLE
 from .ecmc_ioc_project import create_ioc_project, parameters_path
-from .ecmc_simulation_qt import SimulationConsole, SimulationOptionsDialog, simulation_command
+from .ecmc_simulation_qt import (SimulationConsole, SimulationOptionsDialog,
+                                 project_simulation_command, project_simulation_config,
+                                 project_simulation_launcher,
+                                 simulation_command)
 
 
 class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
@@ -382,7 +385,8 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
             self.statusBar().showMessage("Cannot parse project: " + str(exc))
             return
         selected = self.object_for_item()
-        file_selection = self.tree.currentItem().data(0, QtCore.Qt.UserRole)[0] if self.row_type() in {"file", "parameters"} else None
+        file_selection = (self.tree.currentItem().data(0, QtCore.Qt.UserRole)[0]
+                          if self.row_type() in {"file", "parameters", "project_file"} else None)
         selected_key = (selected.source.resolve(), selected.line, selected.kind) if selected else None
         expanded = {key for key, item in self.object_items.items() if item.isExpanded()}
         self.model = model
@@ -440,6 +444,39 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
             item.setData(0, ROW_ROLE, "parameters")
             if file_selection == parameters:
                 self.tree.setCurrentItem(item)
+        simulation = self.startup.parent / "simulation"
+        if simulation.is_dir():
+            simulation_item = QtWidgets.QTreeWidgetItem(self.tree, ["Simulation"])
+            simulation_item.setToolTip(0, str(simulation))
+            simulation_item.setData(0, ROW_ROLE, "project_directory")
+
+            def add_directory(parent, directory):
+                try:
+                    entries = sorted(
+                        (entry for entry in directory.iterdir()
+                         if not entry.name.startswith(".") and entry.name != "__pycache__"),
+                        key=lambda entry: (not entry.is_dir(), entry.name.lower()),
+                    )
+                except OSError:
+                    return
+                for entry in entries:
+                    if entry.is_dir() and not entry.is_symlink():
+                        child = QtWidgets.QTreeWidgetItem(parent, [entry.name])
+                        child.setToolTip(0, str(entry))
+                        child.setData(0, ROW_ROLE, "project_directory")
+                        add_directory(child, entry)
+                    elif entry.is_file() and entry.suffix != ".pyc":
+                        path = entry.resolve()
+                        dirty = path in self.buffers and self.buffers[path] != self.saved[path]
+                        child = QtWidgets.QTreeWidgetItem(parent, [entry.name + (" *" if dirty else "")])
+                        child.setToolTip(0, str(path))
+                        child.setData(0, QtCore.Qt.UserRole, (path, 1))
+                        child.setData(0, ROW_ROLE, "project_file")
+                        if file_selection == path:
+                            self.tree.setCurrentItem(child)
+
+            add_directory(simulation_item, simulation)
+            simulation_item.setExpanded(True)
         if selected_key in self.object_items:
             self.tree.setCurrentItem(self.object_items[selected_key])
             self.show_properties(self.object_for_item())
@@ -518,24 +555,42 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
             )
             if choice != QtWidgets.QMessageBox.Save or not self.save_all():
                 return
-        options = SimulationOptionsDialog(self)
+        repository = Path(__file__).resolve().parents[1]
+        project_launcher = project_simulation_launcher(self.startup)
+        try:
+            project_config = project_simulation_config(self.startup) if project_launcher else {}
+            project_ioc_name = project_config.get("ioc_name")
+        except ValueError as exc:
+            self.error(exc)
+            return
+        options = SimulationOptionsDialog(self, project_launcher, project_ioc_name)
         if options.exec_() != QtWidgets.QDialog.Accepted:
             return
         try:
-            command = simulation_command(self.startup, Path(__file__).resolve().parents[1],
-                                         options.image.text(), options.hardware_sim.isChecked(),
-                                         options.local_sources.isChecked())
+            command = (project_simulation_command(
+                self.startup, repository, options.image.text(), options.local_sources.isChecked())
+                       if options.uses_project_plant() else None)
+            custom_plant = command is not None
+            ioc_name = project_ioc_name if custom_plant else "SIMIOC"
+            ioc_shell = project_config.get("ioc_shell", False) if custom_plant else True
+            if command is None:
+                command = simulation_command(self.startup, repository,
+                                             options.image.text(), options.uses_generic_plant(),
+                                             options.local_sources.isChecked())
         except ValueError as exc:
             self.error(exc)
             return
         console = SimulationConsole(command, self.startup.parent, self,
-                                    options.detached_online_tools.isChecked())
+                                    options.detached_online_tools.isChecked(),
+                                    stop_with_interrupt=custom_plant, ioc_name=ioc_name,
+                                    ioc_shell=ioc_shell)
         if self.simulation_console is not None:
             old = self.simulation_console
             self.tabs.removeTab(self.tabs.indexOf(old))
             old.deleteLater()
         self.simulation_console = console
-        self.tabs.setCurrentIndex(self.tabs.addTab(console, "Simulation — SIMIOC"))
+        tab_title = "Simulation — Project plant" if custom_plant else "Simulation — SIMIOC"
+        self.tabs.setCurrentIndex(self.tabs.addTab(console, tab_title))
         close_button = QtWidgets.QToolButton(self.tabs)
         close_button.setText("×")
         close_button.setToolTip("Close simulation tab (stops a running IOC)")

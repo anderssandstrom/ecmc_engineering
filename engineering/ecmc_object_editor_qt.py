@@ -589,6 +589,12 @@ class ObjectEditingMixin:
         menu = QtWidgets.QMenu(self.tree)
         obj = self.object_for_item()
         row_type = self.row_type()
+        if row_type == "project_file":
+            path = self.tree.currentItem().data(0, QtCore.Qt.UserRole)[0]
+            menu.addAction("Open Project File", lambda: self.show_file(path))
+            return menu
+        if row_type == "project_directory":
+            return menu
         if row_type == "parameters":
             path = self.tree.currentItem().data(0, QtCore.Qt.UserRole)[0]
             menu.addAction("Open Parameters File", lambda: self.show_file(path))

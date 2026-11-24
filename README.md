@@ -315,14 +315,50 @@ the scripts from the engineering repository root:
 See [the simulation runtime documentation](ecmc_podman/readme.md) for setup,
 module versions, and Python hardware models.
 
+### Simulation prerequisites and disk space
+
+The host needs:
+
+- **Podman**, with its service available. Native Linux runs Podman directly;
+  macOS users must create and start a Podman machine (`podman machine init`,
+  then `podman machine start`).
+- **Bash** to run the container launch scripts.
+- **Git** to clone this repository and initialize its submodules. Git is also
+  used when building from the local ecmc, ecmccfg and ecmccomp checkouts.
+- **Python 3** for local-source preparation and project-owned launchers such as
+  `simulation/run.py`. EPICS and the generic hardware-model Python dependencies
+  are already included in the container image.
+
+The current `ecmc-dev:local` image occupies approximately **2.7 GB unpacked**;
+allow about **3 GB per installed image**. Registry transfers and exported
+compressed archives are normally smaller. Local builds need several additional
+gigabytes temporarily for cached layers, downloaded packages and compiler
+output, so substantially more than 3 GB of free Podman storage is recommended.
+For builds inside a Podman VM, 8 GB of VM memory is a useful starting point.
+
+Check the size of an installed image with:
+
+```bash
+podman images ecmc-dev:local
+podman image inspect ecmc-dev:local --format '{{.Size}} bytes'
+```
+
 In the **Qt engineering tool**, open your project and click **Simulate**. Choose
-the container image and whether to **Enable Python hardware simulation**, then
-click **Start**. **Use local ecmc, ecmccfg and ecmccomp submodules** is enabled
-by default. With the default options this runs:
+the container image and select **No simulation plant**, **Generic hardware
+simulation**, or a detected project plant, then click **Start**. **Use local
+ecmc, ecmccfg and ecmccomp submodules** is enabled by default. With the generic
+plant selected this runs:
 
 ```bash
 ./ecmc_podman/run-sim.sh --local-sources --image ecmc-dev:local --ioc-name SIMIOC --hardware-sim /path/to/project/IOC_startup.cmd
 ```
+
+An IOC project can provide a coupled plant by adding `simulation/run.py`.
+Engineering Qt detects that standard layout and uses the project launcher in
+place of the generic launcher, passing the selected image, engineering checkout,
+and local-sources choice. The start dialog can instead select the generic
+hardware simulation for that run. See [Project simulation layout](docs/project-simulation.md)
+for the directory structure and launcher/lifecycle contract.
 
 Podman must be running. The first local-source launch builds `ecmc-dev:local`
 from the existing submodules, including local edits, and may take several minutes

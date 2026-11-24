@@ -10,7 +10,12 @@ import unittest
 from unittest.mock import patch
 
 from engineering.ecmc_engineering_qt import EngineeringWindow, QtWidgets, QtCore
-from engineering.ecmc_simulation_qt import SimulationConsole, SimulationOptionsDialog, simulation_command, simulation_online_environment
+from engineering.ecmc_simulation_qt import (SimulationConsole, SimulationOptionsDialog,
+                                            project_simulation_command,
+                                            project_simulation_config,
+                                            project_simulation_ioc_name,
+                                            project_simulation_launcher, simulation_command,
+                                            simulation_online_environment)
 
 
 class SimulationTests(unittest.TestCase):
@@ -53,6 +58,92 @@ class SimulationTests(unittest.TestCase):
         self.assertNotIn('--local-sources', command)
         self.assertIn('ecmc-dev:portable', command)
 
+    def test_standard_project_simulation_is_detected(self):
+        simulation = self.root / 'simulation'
+        simulation.mkdir()
+        launcher = simulation / 'run.py'
+        launcher.write_text('# project plant launcher\n')
+        (simulation / 'config.json').write_text(
+            '{"ioc_name": "SIMPGM", "ioc_shell": true}\n')
+        self.assertEqual(project_simulation_launcher(self.startup), launcher)
+        self.assertEqual(project_simulation_ioc_name(self.startup), 'SIMPGM')
+        self.assertTrue(project_simulation_config(self.startup)['ioc_shell'])
+        command = project_simulation_command(
+            self.startup, Path(__file__).resolve().parents[1],
+            image='custom:plant', local_sources=False)
+        self.assertEqual(command[0], __import__('sys').executable)
+        self.assertEqual(command[1:3], ['-u', str(launcher)])
+        self.assertIn('--engineering', command)
+        self.assertIn('custom:plant', command)
+        self.assertNotIn('--local-sources', command)
+        dialog = SimulationOptionsDialog(project_launcher=launcher, project_ioc_name='SIMPGM')
+        self.assertTrue(dialog.uses_project_plant())
+        self.assertEqual(dialog.ioc_name_label.text(), 'SIMPGM')
+        dialog.plant_source.setCurrentIndex(1)
+        self.assertFalse(dialog.uses_project_plant())
+        self.assertTrue(dialog.uses_generic_plant())
+        self.assertEqual(dialog.ioc_name_label.text(), 'SIMIOC')
+        dialog.plant_source.setCurrentIndex(0)
+        self.assertFalse(dialog.uses_project_plant())
+        self.assertFalse(dialog.uses_generic_plant())
+
+    def test_standard_project_simulation_routes_simulate_action(self):
+        simulation = self.root / 'simulation'
+        simulation.mkdir()
+        launcher = simulation / 'run.py'
+        launcher.write_text('# project plant launcher\n')
+        (simulation / 'config.json').write_text(
+            '{"ioc_name": "SIMPGM", "ioc_shell": true}\n')
+        (simulation / 'README.md').write_text('# Plant notes\n')
+        generated = simulation / '__pycache__'
+        generated.mkdir()
+        (generated / 'run.pyc').write_bytes(b'generated')
+        self.window.rebuild()
+        simulation_item = self.window.tree.topLevelItem(
+            self.window.tree.topLevelItemCount() - 1)
+        self.assertEqual(simulation_item.text(0), 'Simulation')
+        self.assertEqual([simulation_item.child(i).text(0)
+                          for i in range(simulation_item.childCount())],
+                         ['config.json', 'README.md', 'run.py'])
+        readme_item = simulation_item.child(1)
+        self.window.tree.setCurrentItem(readme_item)
+        self.assertEqual(self.window.current, simulation / 'README.md')
+        self.assertEqual(self.window.editor.toPlainText(), '# Plant notes\n')
+        with patch.object(SimulationOptionsDialog, 'exec_', return_value=QtWidgets.QDialog.Accepted), \
+                patch.object(SimulationConsole, 'start'):
+            self.window.simulate_project()
+        console = self.window.simulation_console
+        self.assertEqual(console.command[2], str(launcher))
+        self.assertTrue(console.stop_with_interrupt)
+        self.assertEqual(console.ioc_name, 'SIMPGM')
+        self.assertEqual(console.console_tabs.count(), 2)
+        self.assertIsNone(console.terminal)
+        self.assertFalse(console.console_tabs.tabBar().isHidden())
+        self.assertFalse(console.online_button.isHidden())
+        self.assertFalse(console.input.isHidden())
+        self.assertFalse(console.send_button.isHidden())
+        self.assertEqual(self.window.tabs.tabText(self.window.tabs.indexOf(console)),
+                         'Simulation — Project plant')
+
+    def test_generic_plant_can_be_selected_for_project(self):
+        simulation = self.root / 'simulation'
+        simulation.mkdir()
+        (simulation / 'run.py').write_text('# project plant launcher\n')
+
+        def choose_generic(dialog):
+            dialog.plant_source.setCurrentIndex(1)
+            return QtWidgets.QDialog.Accepted
+
+        with patch.object(SimulationOptionsDialog, 'exec_', choose_generic), \
+                patch.object(SimulationConsole, 'start'):
+            self.window.simulate_project()
+        console = self.window.simulation_console
+        self.assertTrue(console.command[1].endswith('ecmc_podman/run-sim.sh'))
+        self.assertIn('--hardware-sim', console.command)
+        self.assertFalse(console.stop_with_interrupt)
+        self.assertEqual(self.window.tabs.tabText(self.window.tabs.indexOf(console)),
+                         'Simulation — SIMIOC')
+
     def test_first_build_notice_and_two_console_tabs(self):
         dialog = SimulationOptionsDialog()
         self.assertIn('may take several minutes', dialog.findChildren(QtWidgets.QLabel)[-1].text())
@@ -61,6 +152,15 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(console.console_tabs.tabText(0), 'IOC shell')
         self.assertEqual(console.console_tabs.tabText(1), 'Terminal')
         self.assertEqual(console.console_tabs.tabText(2), 'Online tools')
+        console.resize(1000, 700)
+        console.show()
+        self.app.processEvents()
+        self.assertLess(console.launch_title.geometry().bottom(),
+                        console.command_display.geometry().top())
+        self.assertLess(console.command_display.geometry().bottom(),
+                        console.status.geometry().top())
+        self.assertLess(console.launch_header.height(), 140)
+        console.close()
 
     def test_detached_online_tools_option_avoids_embedded_navigator(self):
         console = SimulationConsole(['bash', 'unused'], self.root, detached_online_tools=True)
@@ -89,7 +189,7 @@ class SimulationTests(unittest.TestCase):
     def test_options_route_image_and_disable_models(self):
         def accept_options(dialog):
             dialog.image.setText('custom:simulation')
-            dialog.hardware_sim.setChecked(False)
+            dialog.plant_source.setCurrentIndex(0)
             return QtWidgets.QDialog.Accepted
         with patch.object(SimulationOptionsDialog, 'exec_', accept_options), patch.object(SimulationConsole, 'start'):
             self.window.simulate_project()

@@ -1,9 +1,12 @@
 """Run the project's Podman simulation launcher in a Qt console."""
 import codecs
+import json
 import os
 from pathlib import Path
 import re
+import signal
 import shlex
+import sys
 
 from qt_compat import QtCore, QtGui, QtWidgets
 
@@ -23,20 +26,82 @@ def simulation_command(startup, repository, image="ecmc-dev:local", hardware_sim
             + (["--hardware-sim"] if hardware_sim else []) + [str(startup)])
 
 
+def project_simulation_launcher(startup):
+    """Find a launcher following the standard project simulation layout."""
+    launcher = Path(startup).resolve().parent / "simulation" / "run.py"
+    return launcher if launcher.is_file() else None
+
+
+def project_simulation_ioc_name(startup):
+    """Read the optional IOC name used by a project-owned simulation."""
+    return project_simulation_config(startup).get("ioc_name")
+
+
+def project_simulation_config(startup):
+    """Read and validate optional project simulation capabilities."""
+    config = Path(startup).resolve().parent / "simulation" / "config.json"
+    if not config.is_file():
+        return {}
+    try:
+        values = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, AttributeError) as exc:
+        raise ValueError("Invalid simulation/config.json: " + str(exc))
+    if not isinstance(values, dict):
+        raise ValueError("simulation/config.json must contain a JSON object.")
+    name = str(values.get("ioc_name", "")).strip()
+    if name and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", name):
+        raise ValueError("simulation/config.json contains an invalid ioc_name.")
+    ioc_shell = values.get("ioc_shell", False)
+    if not isinstance(ioc_shell, bool):
+        raise ValueError("simulation/config.json ioc_shell must be true or false.")
+    return {"ioc_name": name or None, "ioc_shell": ioc_shell}
+
+
+def project_simulation_command(startup, repository, image="ecmc-dev:local", local_sources=True):
+    """Build the command for a project-owned IOC and plant simulation."""
+    launcher = project_simulation_launcher(startup)
+    if launcher is None:
+        return None
+    if not image.strip():
+        raise ValueError("Enter a simulation image.")
+    command = [sys.executable, "-u", str(launcher), "--engineering",
+               str(Path(repository).resolve()), "--image", image.strip()]
+    if local_sources:
+        command.append("--local-sources")
+    return command
+
+
 class SimulationOptionsDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, project_launcher=None, project_ioc_name=None):
         super().__init__(parent)
+        self.has_project_launcher = project_launcher is not None
         self.setWindowTitle("Start simulation")
         layout = QtWidgets.QFormLayout(self)
         self.image = QtWidgets.QLineEdit("ecmc-dev:local")
         layout.addRow("Container image", self.image)
-        layout.addRow("IOC name", QtWidgets.QLabel("SIMIOC"))
+        ioc_label = project_ioc_name or "SIMIOC"
+        self.project_ioc_name = project_ioc_name
+        self.ioc_name_label = QtWidgets.QLabel(ioc_label)
+        layout.addRow("IOC name", self.ioc_name_label)
         self.local_sources = QtWidgets.QCheckBox("Use local ecmc, ecmccfg and ecmccomp submodules")
         self.local_sources.setChecked(True)
         layout.addRow(self.local_sources)
-        self.hardware_sim = QtWidgets.QCheckBox("Enable Python hardware simulation")
-        self.hardware_sim.setChecked(True)
-        layout.addRow(self.hardware_sim)
+        self.plant_source = QtWidgets.QComboBox()
+        self.plant_source.addItem("No simulation plant", "none")
+        self.plant_source.addItem("Generic hardware simulation", "generic")
+        if project_launcher is not None:
+            self.plant_source.addItem("Project plant (simulation/run.py)", "project")
+            self.plant_source.setCurrentIndex(2)
+        else:
+            self.plant_source.setCurrentIndex(1)
+        layout.addRow("Simulation plant", self.plant_source)
+        self.plant_source.currentIndexChanged.connect(self.update_ioc_name)
+        if project_launcher is not None:
+            detected = QtWidgets.QLabel(
+                "Project simulation detected: {}\nThe project launcher will start the IOC and coupled plant."
+                .format(project_launcher))
+            detected.setWordWrap(True)
+            layout.addRow(detected)
         self.detached_online_tools = QtWidgets.QCheckBox("Open online tools in a separate window")
         self.detached_online_tools.setChecked(False)
         layout.addRow(self.detached_online_tools)
@@ -52,6 +117,16 @@ class SimulationOptionsDialog(QtWidgets.QDialog):
         self.image.textChanged.connect(lambda text: buttons.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(bool(text.strip())))
         layout.addRow(buttons)
 
+    def uses_project_plant(self):
+        return self.has_project_launcher and self.plant_source.currentData() == "project"
+
+    def uses_generic_plant(self):
+        return self.plant_source.currentData() == "generic"
+
+    def update_ioc_name(self, *_):
+        self.ioc_name_label.setText(
+            self.project_ioc_name if self.uses_project_plant() else "SIMIOC")
+
 
 def simulation_online_environment():
     environment = QtCore.QProcessEnvironment.systemEnvironment()
@@ -64,7 +139,8 @@ def simulation_online_environment():
 
 
 class SimulationConsole(QtWidgets.QWidget):
-    def __init__(self, command, working_directory, parent=None, detached_online_tools=False):
+    def __init__(self, command, working_directory, parent=None, detached_online_tools=False,
+                 stop_with_interrupt=False, ioc_name="SIMIOC", ioc_shell=True):
         super().__init__(parent)
         self.command = list(command)
         self.working_directory = str(working_directory)
@@ -72,25 +148,42 @@ class SimulationConsole(QtWidgets.QWidget):
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending_escape = ""
         self.detached_online_tools = detached_online_tools
+        self.stop_with_interrupt = stop_with_interrupt
+        self.ioc_name = ioc_name
+        self.ioc_shell = ioc_shell
         self.online_navigator = None
         self.saved_ca_environment = None
         layout = QtWidgets.QVBoxLayout(self)
+        self.launch_header = QtWidgets.QFrame()
+        self.launch_header.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.launch_header.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        header_layout = QtWidgets.QVBoxLayout(self.launch_header)
         image = self.command[self.command.index("--image") + 1] if "--image" in self.command else "custom launcher"
         models = "enabled" if "--hardware-sim" in self.command else "disabled"
-        title = QtWidgets.QLabel(f"Simulation: SIMIOC — {image} — Python hardware models {models}")
-        title.setWordWrap(True)
-        layout.addWidget(title)
-        command_label = QtWidgets.QLabel(shlex.join(self.command))
-        command_label.setWordWrap(True)
-        command_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        layout.addWidget(command_label)
+        if stop_with_interrupt:
+            title_text = f"Project simulation — {image} — coupled plant"
+        else:
+            title_text = f"Simulation: SIMIOC — {image} — Python hardware models {models}"
+        self.launch_title = QtWidgets.QLabel(title_text)
+        header_layout.addWidget(self.launch_title)
+        command_text = shlex.join(self.command)
+        self.command_display = QtWidgets.QLineEdit(command_text)
+        self.command_display.setReadOnly(True)
+        self.command_display.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        self.command_display.setToolTip(command_text)
+        self.command_display.setCursorPosition(0)
+        header_layout.addWidget(self.command_display)
         self.status = QtWidgets.QLabel("Ready")
-        layout.addWidget(self.status)
+        header_layout.addWidget(self.status)
+        self.launch_header.setFixedHeight(self.launch_header.sizeHint().height())
+        layout.addWidget(self.launch_header)
         self.console_tabs = QtWidgets.QTabWidget()
         ioc_page = QtWidgets.QWidget()
         ioc_layout = QtWidgets.QVBoxLayout(ioc_page)
         ioc_layout.setContentsMargins(0, 0, 0, 0)
-        ioc_layout.addWidget(QtWidgets.QLabel("IOC shell — output and simulation logs"))
+        output_title = ("Project launcher — IOC and plant output" if stop_with_interrupt
+                        else "IOC shell — output and simulation logs")
+        ioc_layout.addWidget(QtWidgets.QLabel(output_title))
         self.output = QtWidgets.QPlainTextEdit()
         self.output.setReadOnly(True)
         self.output.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
@@ -100,21 +193,26 @@ class SimulationConsole(QtWidgets.QWidget):
         self.input = QtWidgets.QLineEdit()
         self.input.setPlaceholderText("IOC shell command (for example: dbl) — press Enter to send")
         self.input.setAccessibleName("IOC shell command")
+        self.input.setVisible(ioc_shell)
         self.input.returnPressed.connect(self.send_command)
         self.send_button = QtWidgets.QPushButton("Send")
         self.send_button.clicked.connect(self.send_command)
+        self.send_button.setVisible(ioc_shell)
         self.stop_button = QtWidgets.QPushButton("Stop Simulation")
         self.stop_button.clicked.connect(self.request_stop)
         self.online_button = QtWidgets.QPushButton("Open Online Tools")
         self.online_button.clicked.connect(self.open_online_tools)
+        self.online_button.setVisible(bool(ioc_name))
         row.addWidget(self.input, 1)
         row.addWidget(self.send_button)
         row.addWidget(self.stop_button)
         row.addWidget(self.online_button)
         ioc_layout.addLayout(row)
-        self.console_tabs.addTab(ioc_page, "IOC shell")
-        self.terminal = ContainerTerminal("ecmc-engineering-simulation", self)
-        self.console_tabs.addTab(self.terminal, "Terminal")
+        self.console_tabs.addTab(ioc_page, "Launcher output" if stop_with_interrupt else "IOC shell")
+        self.terminal = None
+        if not stop_with_interrupt:
+            self.terminal = ContainerTerminal("ecmc-engineering-simulation", self)
+            self.console_tabs.addTab(self.terminal, "Terminal")
         self.online_page = QtWidgets.QWidget()
         online_layout = QtWidgets.QVBoxLayout(self.online_page)
         if detached_online_tools:
@@ -128,7 +226,10 @@ class SimulationConsole(QtWidgets.QWidget):
                 "Start the simulation, then open this tab to load the IOC navigator.")
             self.online_placeholder.setAlignment(QtCore.Qt.AlignCenter)
             online_layout.addWidget(self.online_placeholder, 1)
-        self.console_tabs.addTab(self.online_page, "Online tools")
+        if ioc_name:
+            self.console_tabs.addTab(self.online_page, "Online tools")
+        if self.console_tabs.count() == 1:
+            self.console_tabs.tabBar().hide()
         self.console_tabs.currentChanged.connect(self.console_tab_changed)
         layout.addWidget(self.console_tabs, 1)
         self.process = QtCore.QProcess(self)
@@ -162,13 +263,13 @@ class SimulationConsole(QtWidgets.QWidget):
             return
         process = QtCore.QProcess()
         process.setProgram("bash")
-        process.setArguments([str(launcher), "SIMIOC"])
+        process.setArguments([str(launcher), self.ioc_name])
         process.setWorkingDirectory(str(launcher.parent))
         process.setProcessEnvironment(simulation_online_environment())
         result = process.startDetached()
         started = result[0] if isinstance(result, tuple) else result
         if started:
-            self.append_output("\nLaunched IOC navigator for SIMIOC on localhost.\n")
+            self.append_output("\nLaunched IOC navigator for {} on localhost.\n".format(self.ioc_name))
         else:
             self.append_output("\nCould not launch online tools: " + process.errorString() + "\n")
 
@@ -185,7 +286,7 @@ class SimulationConsole(QtWidgets.QWidget):
         self.enable_simulation_ca_environment()
         try:
             from ecmc_ioc_navigator import IocNavigator
-            self.online_navigator = IocNavigator("SIMIOC")
+            self.online_navigator = IocNavigator(self.ioc_name)
             self.online_navigator.setWindowFlags(QtCore.Qt.Widget)
             layout = self.online_page.layout()
             layout.removeWidget(self.online_placeholder)
@@ -266,7 +367,12 @@ class SimulationConsole(QtWidgets.QWidget):
         if not self.is_running() or self.stop_requested:
             return
         self.stop_requested = True
-        if self.process.state() == QtCore.QProcess.Running:
+        if self.process.state() == QtCore.QProcess.Running and self.stop_with_interrupt:
+            try:
+                os.kill(self.process.processId(), signal.SIGINT)
+            except (OSError, TypeError, ValueError):
+                self.process.terminate()
+        elif self.process.state() == QtCore.QProcess.Running:
             self.process.write(b"exit\n")
             self.process.closeWriteChannel()
         self.set_controls(False)
@@ -276,7 +382,8 @@ class SimulationConsole(QtWidgets.QWidget):
         self.read_output()
         self.append_process_output(self.decoder.decode(b"", final=True), final=True)
         self.set_controls(False)
-        self.terminal.disconnect_terminal()
+        if self.terminal is not None:
+            self.terminal.disconnect_terminal()
         self.restore_ca_environment()
         if exit_status == QtCore.QProcess.NormalExit and code == 0:
             self.status.setText("Simulation stopped")
