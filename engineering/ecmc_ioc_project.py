@@ -37,7 +37,7 @@ def create_ioc_project(parent, name):
 
 
 def parameters_path(startup):
-    suffix = "_startup.cmd"
-    if startup.name.endswith(suffix):
-        return startup.with_name(startup.name[:-len(suffix)] + "_parameters.yaml")
+    for suffix in ("_startup.cmd", "_startup.script"):
+        if startup.name.endswith(suffix):
+            return startup.with_name(startup.name[:-len(suffix)] + "_parameters.yaml")
     return None

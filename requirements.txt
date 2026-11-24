@@ -1,0 +1,6 @@
+# Host environment for Engineering Studio, online tools and simulation checks.
+PyQt5>=5.15,<6
+pyepics>=3.5,<4
+numpy>=1.23,<3
+PyYAML>=6,<7
+Jinja2>=3.1,<4

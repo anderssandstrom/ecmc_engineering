@@ -277,16 +277,21 @@ class EngineeringWindow(ObjectEditingMixin, QtWidgets.QMainWindow):
 
     def load_project_directory(self, directory):
         directory = Path(directory).expanduser().resolve()
-        preferred = directory / (directory.name + "_startup.cmd")
-        if preferred.is_file():
-            self.load_project(preferred)
-            return
-        candidates = sorted(path for path in directory.glob("*_startup.cmd") if path.is_file())
-        conventional = directory / "startup.cmd"
-        if conventional.is_file():
-            candidates.append(conventional)
+        for extension in ("cmd", "script"):
+            preferred = directory / (directory.name + "_startup." + extension)
+            if preferred.is_file():
+                self.load_project(preferred)
+                return
+        candidates = sorted(
+            path for extension in ("cmd", "script")
+            for path in directory.glob("*_startup." + extension) if path.is_file()
+        )
+        for extension in ("cmd", "script"):
+            conventional = directory / ("startup." + extension)
+            if conventional.is_file():
+                candidates.append(conventional)
         if not candidates:
-            self.error("No startup file found in {}.\nExpected {} or startup.cmd. Use Open Startup File for another filename.".format(directory, preferred.name))
+            self.error("No startup file found in {}.\nExpected *_startup.cmd, *_startup.script, startup.cmd or startup.script. Use Open Startup File for another filename.".format(directory))
             return
         if len(candidates) == 1:
             self.load_project(candidates[0])

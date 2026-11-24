@@ -36,7 +36,7 @@ but is not currently a tested or supported configuration.
 
 Install these base tools:
 
-- Python 3
+- Python 3.9 or newer for the setup script
 - Git and Bash
 - all Git submodules (`git submodule update --init --recursive`)
 - one Qt Python binding: `PyQt5` or `PySide6`
@@ -47,20 +47,34 @@ client backend:
 - `pyepics` (preferred), or
 - the EPICS `caget` and `caput` command-line tools on `PATH`
 
-The launcher does not create or modify a host Python environment. It uses
-`ECMC_PYTHON` when set, otherwise the first `python` or `python3` with a supported
-Qt binding. An optional isolated environment can be prepared with:
+The simplest setup (including on Red Hat) is:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install PyQt5 pyepics
-export ECMC_PYTHON="$PWD/.venv/bin/python"
+bash setup_engineering_venv.sh
+bash start_engineering_qt.sh
 ```
 
-Use `PySide6` instead of `PyQt5` if preferred. The `.venv` directory is a local
-host environment and should not be committed.
+The setup script creates `.venv` in the checkout and installs Qt, PyEpics,
+NumPy, PyYAML and Jinja2 from `requirements.txt`. It needs access to a Python
+package index. Rerun it after pulling dependency changes or to install missing
+packages. No activation or `sudo pip` is needed; `.venv` is ignored by Git.
+
+If Red Hat's default `python3` is too old, install a newer Python with pip/venv
+support through your system administrator or package manager, then select it:
+
+```bash
+bash setup_engineering_venv.sh python3.11
+```
+
+An existing `.venv` is reused; choosing a different interpreter does not rebuild
+it. Move the old environment aside first when changing Python versions.
+The launcher uses `ECMC_PYTHON` when explicitly set, otherwise the checkout's
+`.venv`, otherwise the first `python` or `python3` with a supported Qt binding.
+Use `unset ECMC_PYTHON` to return to automatic selection. Manually managed
+environments can use `PySide6` instead of `PyQt5`.
+
+The virtual environment supplies Python packages; Qt still needs the host's
+graphics libraries and a graphical session (or X forwarding over SSH).
 
 Simulation additionally requires:
 

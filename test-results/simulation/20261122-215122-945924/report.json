@@ -1,0 +1,123 @@
+{
+  "status": "interrupted",
+  "selected": [
+    "offline",
+    "inventory",
+    "motion",
+    "slit"
+  ],
+  "stages": [
+    {
+      "name": "dependencies",
+      "status": "passed",
+      "seconds": 0.001
+    },
+    {
+      "name": "offline/test_ds402_model",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_el5021",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_el7041_model",
+      "status": "passed",
+      "seconds": 0.212
+    },
+    {
+      "name": "offline/test_simulation_gui",
+      "status": "passed",
+      "seconds": 1.886
+    },
+    {
+      "name": "offline/test_simulation_ioc",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_simulation_terminals",
+      "status": "passed",
+      "seconds": 0.315
+    },
+    {
+      "name": "offline/test_slit_acceptance",
+      "status": "passed",
+      "seconds": 0.829
+    },
+    {
+      "name": "offline/test_slit_backlash",
+      "status": "passed",
+      "seconds": 1.554
+    },
+    {
+      "name": "offline/test_slit_boundaries",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_disturbance",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_enable_timeout",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_encoder_power",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_homing",
+      "status": "passed",
+      "seconds": 0.212
+    },
+    {
+      "name": "offline/test_slit_index_encoders",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_interfaces",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_isolation",
+      "status": "passed",
+      "seconds": 0.108
+    },
+    {
+      "name": "offline/test_slit_limit_modes",
+      "status": "passed",
+      "seconds": 0.21
+    },
+    {
+      "name": "offline/test_slit_limit_sync",
+      "status": "passed",
+      "seconds": 0.107
+    },
+    {
+      "name": "offline/test_slit_motion_requests",
+      "status": "passed",
+      "seconds": 0.527
+    },
+    {
+      "name": "offline/test_slit_native",
+      "status": "interrupted",
+      "seconds": 0.106
+    }
+  ],
+  "filters": {
+    "motion_case": [],
+    "slit_loop": "both",
+    "slit_case": [],
+    "slit_test": [],
+    "startat": null
+  }
+}
